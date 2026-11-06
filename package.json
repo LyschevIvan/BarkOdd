@@ -1,0 +1,12 @@
+{
+  "name": "barkodd",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/noise.test.mjs && node tests/media.test.mjs && node tests/rtc.test.mjs",
+    "test:browser": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1"
+  }
+}

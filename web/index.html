@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#203e37">
+  <meta name="description" content="BarkOdd — будьте рядом с питомцем, даже когда вы не дома.">
+  <meta name="referrer" content="no-referrer">
+  <title>BarkOdd — рядом, даже издалека</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23203e37'/%3E%3Cpath d='M12 24q-1-8 8-8t8 8q-1 6-8 3-7 3-8-3' fill='%23edbd65'/%3E%3Cellipse cx='11' cy='14' rx='3' ry='4' fill='%23edbd65'/%3E%3Cellipse cx='19' cy='10' rx='3' ry='4' fill='%23edbd65'/%3E%3Cellipse cx='27' cy='13' rx='3' ry='4' fill='%23edbd65'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <svg class="svg-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-paw" viewBox="0 0 24 24"><path d="M6 16c0-3 3-6 6-6s6 3 6 6-3 4-6 2c-3 2-6 1-6-2Z" fill="currentColor" stroke="none"/><ellipse cx="5" cy="9" rx="2.2" ry="3" fill="currentColor" stroke="none"/><ellipse cx="10" cy="5" rx="2.2" ry="3" fill="currentColor" stroke="none"/><ellipse cx="16" cy="5.5" rx="2.2" ry="3" fill="currentColor" stroke="none"/><ellipse cx="21" cy="10" rx="2.2" ry="3" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="13" rx="3"/><path d="m16 10 5-3v11l-5-3"/></symbol>
+    <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 5h4m-3 14h2"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-sound" viewBox="0 0 24 24"><path d="M3 9h4l5-4v14l-5-4H3Zm13-1a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-photo" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m3 17 5-5 4 4 4-6 5 7"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H3v13h5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Zm-4 9 3 3 5-6"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 7a7 7 0 0 1 12-1l2 6M4 12l2 6a7 7 0 0 0 12-1"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z" fill="currentColor" stroke="none"/></symbol>
+  </svg>
+
+  <div class="app-shell">
+    <header class="site-header">
+      <a class="brand" href="./" aria-label="BarkOdd — главная"><span class="brand-mark"><svg class="icon"><use href="#i-paw"/></svg></span><span>Bark<span class="brand-odd">Odd</span><span class="brand-dot">.</span></span></a>
+      <span class="header-note">Маленькая забота. Большое спокойствие.</span>
+      <button id="switch-role" class="button button-quiet" hidden><span id="role-label">Сменить устройство</span><svg class="icon"><use href="#i-refresh"/></svg></button>
+    </header>
+
+    <main>
+      <section id="welcome" class="welcome" aria-labelledby="welcome-title">
+        <div class="welcome-copy">
+          <div class="eyebrow"><span class="tiny-dot"></span> ДОМА ВСЁ ХОРОШО</div>
+          <h1 id="welcome-title">Рядом.<br>Даже <span class="serif-word">издалека.</span></h1>
+          <p class="welcome-description">Оставьте одно устройство с питомцем.<br class="desktop-break"> И заглядывайте домой с другого — когда захотите.</p>
+          <div class="welcome-benefits"><span><svg class="icon"><use href="#i-camera"/></svg> Видео по запросу</span><span><svg class="icon"><use href="#i-sound"/></svg> История шума</span><span><svg class="icon"><use href="#i-photo"/></svg> Фото моментов</span></div>
+        </div>
+        <div class="dog-scene" aria-hidden="true">
+          <div class="scene-stamp">A LITTLE PEACE OF MIND <span>✳</span></div>
+          <svg viewBox="0 0 560 370" class="dog-illustration" role="presentation">
+            <ellipse cx="286" cy="306" rx="211" ry="24" fill="#d8d9c9"/><path d="M42 292V161a15 15 0 0 1 15-15h22v146" fill="#b5bf9b"/><path d="M66 196C8 172 19 114 30 108c47 19 53 64 36 88m3 40c53-7 73-45 64-59-42 4-67 25-64 59" fill="#829c77"/><path d="M60 282h27l-5 31H65Z" fill="#c79062"/>
+            <rect x="112" y="207" width="366" height="97" rx="45" fill="#e7b563"/><path d="M121 271c87-24 253-20 345 1v7a26 26 0 0 1-26 26H147a26 26 0 0 1-26-26Z" fill="#d9a34e"/><path d="M161 208c-11-67 56-100 144-75 71-21 125 10 127 80" fill="#b77951"/><path d="M171 216c-34 1-38 27 7 30h124c43-2 49-25 6-32" fill="#dbab7f"/><path d="M345 211c-9 17 5 36 35 36h32c28 0 24-24-2-27" fill="#dbab7f"/>
+            <path d="M204 151c-5-15-21-20-30-10-12 14 1 30 14 34" fill="none" stroke="#b77951" stroke-width="22" stroke-linecap="round"/><path d="M303 170c-5-69 19-108 68-100 52-4 74 37 59 95l-19 49h-87Z" fill="#dbab7f"/><path d="M320 78c-37-11-51 3-44 39l8 43c6 20 23 16 26-3l12-56m80-23c40-15 58 5 45 40l-14 39c-7 19-23 17-23-5l-3-53" fill="#885239"/><ellipse cx="372" cy="166" rx="39" ry="32" fill="#f6dfba"/><path d="M364 153q8-7 16 0l-2 6q-6 7-12 0Z" fill="#203e37"/><path d="M372 161v8m-12 0q12 10 24 0M333 134q8-8 16 0m45 0q8-8 16 0" fill="none" stroke="#203e37" stroke-width="4" stroke-linecap="round"/><path d="M321 199q50 22 98-1" fill="none" stroke="#203e37" stroke-width="9"/><circle cx="373" cy="210" r="9" fill="#e7b563"/><path d="m370 209 3 3 4-5" fill="none" stroke="#946d34" stroke-width="2"/>
+            <path d="m450 61 16-9-9 19 18-9m-12-35 17-9-9 18 18-8" fill="none" stroke="#829c77" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <div class="scene-note"><span class="tiny-dot"></span> Ближе к тем, кто ждёт дома</div>
+        </div>
+        <div id="welcome-alert" class="notice notice-error welcome-alert" role="alert" hidden></div>
+        <div class="role-section">
+          <div class="section-overline"><span>01</span> ВЫБЕРИТЕ ЭТО УСТРОЙСТВО</div>
+          <div class="role-grid">
+            <button class="role-card" id="choose-host"><span class="role-icon"><svg class="icon"><use href="#i-paw"/></svg></span><span class="role-content"><strong>Я остаюсь с питомцем</strong><span>Ноутбук дома: камера, микрофон<br>и забота в ваше отсутствие.</span></span><svg class="icon role-arrow"><use href="#i-arrow"/></svg></button>
+            <button class="role-card" id="choose-viewer"><span class="role-icon role-icon-light"><svg class="icon"><use href="#i-phone"/></svg></span><span class="role-content"><strong>Я буду заглядывать</strong><span>Телефон или другой компьютер:<br>заглянуть домой и успокоиться.</span></span><svg class="icon role-arrow"><use href="#i-arrow"/></svg></button>
+          </div>
+        </div>
+        <div id="setup-panel" class="setup-panel" hidden>
+          <form id="host-form" hidden>
+            <div><h2>Уютному месту — своё имя</h2><p>Так вы узнаете комнату на другом устройстве.</p></div>
+            <div class="field"><label for="creation-key">Ключ владельца сервера</label><input id="creation-key" type="password" minlength="32" maxlength="128" autocomplete="off" spellcheck="false" required><p class="field-hint">Нужен для создания комнаты. Ключ не сохраняется в приложении.</p></div>
+            <label for="room-name">Название комнаты</label>
+            <div class="input-action"><input id="room-name" name="name" maxlength="60" placeholder="Например, дом Бруно" autocomplete="off" required><button class="button button-primary" type="submit">Создать комнату <svg class="icon"><use href="#i-arrow"/></svg></button></div>
+          </form>
+          <form id="viewer-form" hidden>
+            <div><h2>Заглянем домой?</h2><p>Отсканируйте QR-код с устройства питомца камерой телефона или вставьте ссылку ниже.</p></div>
+            <label for="viewer-link">Ссылка на комнату</label>
+            <div class="input-action"><input id="viewer-link" name="link" type="text" placeholder="https://…/#room=…&key=…" autocomplete="off" spellcheck="false" required><button class="button button-primary" type="submit">Подключиться <svg class="icon"><use href="#i-arrow"/></svg></button></div>
+          </form>
+        </div>
+        <p class="welcome-footnote"><svg class="icon"><use href="#i-shield"/></svg> Без регистрации. Доступ к комнате — только по вашей личной ссылке.</p>
+        <button id="forget-binding" class="text-button forget-button" hidden>Забыть сохранённые устройства в этом браузере</button>
+      </section>
+
+      <section id="dashboard" class="dashboard" hidden aria-labelledby="room-title">
+        <div class="dashboard-heading"><div><div id="dashboard-eyebrow" class="eyebrow">ВАШЕ МАЛЕНЬКОЕ МЕСТО СПОКОЙСТВИЯ</div><h1 id="room-title">Дома</h1></div><div class="status-pill" id="room-status"><span class="tiny-dot"></span><span id="room-status-text">Подключаемся</span></div></div>
+        <div id="dashboard-alert" class="notice notice-error" role="alert" hidden></div>
+        <div class="dashboard-layout">
+          <div class="main-column">
+            <section class="video-card" aria-label="Камера питомца">
+              <div class="video-heading"><span><svg class="icon"><use href="#i-camera"/></svg> <span id="video-heading-text">Камера дома</span></span><span id="video-mode" class="video-mode">КАМЕРА ВЫКЛЮЧЕНА</span></div>
+              <div class="video-stage" id="video-stage">
+                <video id="camera-video" autoplay playsinline muted hidden></video>
+                <video id="remote-video" autoplay playsinline muted hidden aria-label="Камера питомца сейчас"></video>
+                <img id="live-frame" alt="Камера питомца сейчас" decoding="async" hidden>
+                <div class="video-placeholder" id="video-placeholder"><div class="placeholder-paw"><svg class="icon"><use href="#i-paw"/></svg></div><h2 id="video-placeholder-title">Тихое место для вашего друга</h2><p id="video-placeholder-text">Включите наблюдение, когда будете готовы.</p></div>
+                <span class="video-corner" id="video-corner" hidden><span class="tiny-dot"></span> <span id="video-corner-text">ПРЯМО СЕЙЧАС</span></span>
+              </div>
+              <div class="video-controls"><div class="media-caption"><span id="media-status" class="media-status" role="status">Камера и микрофон выключены</span><span id="stream-note" class="stream-note" hidden>5 кадров/с · без прямого звука</span></div><div class="control-buttons"><button id="capture-button" class="button button-amber"><svg class="icon"><use href="#i-play"/></svg><span>Включить наблюдение</span></button></div></div>
+            </section>
+            <div class="summary-grid">
+              <article class="summary-card"><span class="summary-icon"><svg class="icon"><use href="#i-sound"/></svg></span><div><span class="small-label">ПОСЛЕДНИЙ ШУМ</span><strong id="last-noise-value">Пока не было</strong><span id="last-noise-detail" class="muted">Здесь появится время события</span></div></article>
+              <article class="summary-card"><span class="summary-icon"><svg class="icon"><use href="#i-clock"/></svg></span><div><span class="small-label">СОБЫТИЙ В ИСТОРИИ</span><strong id="event-count">0</strong><span class="muted">За последние 7 дней</span></div></article>
+            </div>
+            <section class="history-section" aria-labelledby="history-title"><div class="section-heading"><div><span class="eyebrow">МАЛЕНЬКИЕ МОМЕНТЫ</span><h2 id="history-title">Что было дома</h2></div><span class="subtle-tag">Шум и фотографии</span></div><p class="section-description">Фиксируем громкие звуки. Это может быть лай, движение или шум за окном.</p><div id="history-empty" class="history-empty"><span class="empty-icon"><svg class="icon"><use href="#i-paw"/></svg></span><div><h3>История пока чистая</h3><p>Когда устройство услышит шум, здесь появится событие и, если камера доступна, фотография.</p></div></div><div id="event-history" class="event-history"></div><button id="more-events" class="button button-secondary more-events" hidden>Показать ещё</button></section>
+          </div>
+          <aside class="side-column">
+            <section id="owner-approval" class="panel" hidden><h2>Подтвердите комнату</h2><p>Для просмотра через сервер ретрансляции владелец должен подтвердить эту комнату на устройстве питомца.</p><form id="approval-form" hidden><div class="field"><label for="approval-key">Ключ владельца сервера</label><input id="approval-key" type="password" minlength="32" maxlength="128" autocomplete="off" spellcheck="false" required></div><button class="button button-secondary" type="submit">Подтвердить комнату</button></form></section>
+            <section id="host-settings" class="panel" hidden aria-labelledby="settings-title"><div class="panel-title"><span class="eyebrow">УСТРОЙСТВО ПИТОМЦА</span><h2 id="settings-title">Всё под контролем</h2></div><form id="settings-form"><div class="field"><label for="video-device">Камера</label><select id="video-device"><option value="">Камера по умолчанию</option></select></div><div class="field"><label for="audio-device">Микрофон</label><select id="audio-device"><option value="">Микрофон по умолчанию</option></select></div><p id="device-hint" class="field-hint">Названия устройств появятся после разрешения доступа.</p><div class="panel-divider"></div><div class="range-label"><label for="sensitivity">Чувствительность к шуму</label><output id="sensitivity-value" for="sensitivity">Средняя</output></div><input id="sensitivity" type="range" min="1" max="100" value="62"><div class="range-captions"><span>Только громкий</span><span>Даже тихий</span></div><div id="level-container" class="sound-level"><span>Уровень звука</span><div class="level-track"><span id="sound-level-bar"></span></div><span id="sound-level-value">—</span></div><div class="field snapshot-field"><label for="snapshot-interval">Фото не чаще, чем раз в</label><select id="snapshot-interval"><option value="10000">10 секунд</option><option value="30000" selected>30 секунд</option><option value="60000">1 минуту</option><option value="120000">2 минуты</option><option value="300000">5 минут</option></select></div><button id="save-settings" class="button button-secondary full-width" type="submit">Сохранить настройки</button><p id="settings-feedback" class="field-hint" role="status"></p></form></section>
+            <section id="pairing-panel" class="panel pairing-panel" hidden aria-labelledby="pairing-title"><span class="eyebrow">НА ДРУГОМ УСТРОЙСТВЕ</span><h2 id="pairing-title">Возьмите дом с собой</h2><p>Отсканируйте камерой телефона — и комната откроется.</p><p id="local-pairing-hint" class="notice notice-error" hidden>Локальная проверка: эта ссылка работает только на этом компьютере. Для телефона откройте приложение по публичному HTTPS-адресу.</p><div class="qr-wrap" id="qr-wrap"><img id="pairing-qr" alt="QR-код для подключения устройства человека" width="184" height="184" hidden><span id="qr-placeholder">Готовим QR-код…</span></div><button id="copy-link" class="button button-primary full-width"><svg class="icon"><use href="#i-copy"/></svg> Скопировать ссылку</button><button id="regenerate-key" class="text-button regenerate-key">Выпустить новую ссылку</button><p class="pairing-footnote"><svg class="icon"><use href="#i-shield"/></svg> У кого есть ссылка, тот может смотреть. Новая ссылка отключит старую.</p></section>
+            <section id="delete-room-panel" class="panel" hidden><h2>Удаление комнаты</h2><p>История и фотографии будут удалены. Все ссылки перестанут работать.</p><button id="delete-room" class="button button-secondary" type="button">Удалить комнату</button></section>
+            <section id="latest-photo-panel" class="panel latest-photo-panel" hidden><span class="eyebrow">ПОСЛЕДНИЙ СНИМОК</span><h2>Один домашний момент</h2><button id="latest-photo-button" class="latest-photo-button" aria-label="Открыть последнее фото"><img id="latest-photo" alt="Последняя фотография во время шума"></button><time id="latest-photo-time" class="muted"></time></section>
+            <section id="viewer-note" class="care-note" hidden><span class="care-note-icon"><svg class="icon"><use href="#i-paw"/></svg></span><h3>Можно просто заглянуть</h3><p>Включайте видео, когда хочется быть рядом. История шума и фото собирается, пока дома работает наблюдение.</p><span class="note-line"></span><p class="small">О звуках дома расскажет история.<br>Уведомлений в фоне пока нет.</p></section>
+            <div id="host-note" class="care-note compact" hidden><svg class="icon"><use href="#i-check"/></svg><p>Оставьте эту вкладку открытой, ноутбук — на зарядке, а спящий режим — выключенным.</p></div>
+          </aside>
+        </div>
+      </section>
+    </main>
+    <footer class="site-footer"><span>BarkOdd<span class="brand-dot">.</span></span><span>Для тех, кто ждёт вас дома.</span><span class="footer-paw"><svg class="icon"><use href="#i-paw"/></svg></span></footer>
+  </div>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="photo-dialog" class="photo-dialog"><button id="close-photo" class="button button-icon dialog-close" aria-label="Закрыть фото"><svg class="icon"><use href="#i-close"/></svg></button><img id="dialog-photo" alt="Фотография во время шумового события"><p id="dialog-photo-caption"></p></dialog>
+</body>
+</html>
