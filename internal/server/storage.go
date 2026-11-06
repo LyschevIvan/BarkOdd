@@ -30,7 +30,7 @@ func validateStored(r *room) error {
 	if r.HostHash == r.ViewerHash {
 		return errors.New("role credentials must differ")
 	}
-	if r.Settings.Threshold < 0.005 || r.Settings.Threshold > 0.5 || r.Settings.QuietMS != 5000 || r.Settings.SnapshotIntervalMS < 10000 || r.Settings.SnapshotIntervalMS > 300000 {
+	if r.Settings.Threshold < minNoiseThreshold || r.Settings.Threshold > maxNoiseThreshold || r.Settings.QuietMS != 5000 || r.Settings.SnapshotIntervalMS < 10000 || r.Settings.SnapshotIntervalMS > 300000 {
 		return errors.New("invalid settings")
 	}
 	if len(r.Events) > maxEvents {

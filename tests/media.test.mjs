@@ -17,7 +17,7 @@ function target(properties = {}) {
   });
 }
 
-function environment({ muted = false, enabled = true, videoReady = false, encodeDelay = 0, frameBytes = 12000, deferredMedia = false, deferredWake = false, rtc = false } = {}) {
+function environment({ muted = false, enabled = true, audioLevel = 0.25, videoReady = false, encodeDelay = 0, frameBytes = 12000, deferredMedia = false, deferredWake = false, rtc = false } = {}) {
   const originals = new Map();
   const replace = (name, value) => {
     originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
@@ -75,8 +75,8 @@ function environment({ muted = false, enabled = true, videoReady = false, encode
     constructor() { this.state = 'running'; audioContext = this; }
     createMediaStreamSource() { return node(); }
     createAnalyser() {
-      // A retained loud buffer must not become an event while its input is muted.
-      return { ...node(), getFloatTimeDomainData: samples => samples.fill(0.25) };
+      // Retained samples must not become an event while their input is muted.
+      return { ...node(), getFloatTimeDomainData: samples => samples.fill(audioLevel) };
     }
     resume() { this.state = 'running'; return Promise.resolve(); }
     close() { this.state = 'closed'; return Promise.resolve(); }
@@ -211,6 +211,19 @@ async function test(name, options, run) {
     console.error(`not ok - ${name}\n${error.stack}`);
   } finally { await env.cleanup(); }
 }
+
+await test('raising sensitivity detects quiet input live and preserves the measured event level', { audioLevel: 0.002 }, async env => {
+  await env.monitor.startHost({ settings: { threshold: 0.003 } });
+  await env.settle();
+  env.openSocket('host');
+  await env.advance(1000);
+  assert.equal(env.posts.filter(post => post.path === '/events').length, 0);
+  env.monitor.updateSettings({ threshold: 0.0005 });
+  await env.advance(1000);
+  const events = env.posts.filter(post => post.path === '/events');
+  assert.ok(events.length > 0, 'quiet input must create an event without restarting capture');
+  assert.ok(Math.abs(events[0].body.level - 0.002) < 0.000001, 'sensitivity must not amplify stored levels');
+});
 
 await test('a live muted microphone reports monitoring=false and recovers on unmute', { muted: true }, async env => {
   await env.monitor.startHost();

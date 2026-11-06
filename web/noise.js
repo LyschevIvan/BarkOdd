@@ -1,3 +1,5 @@
+export const DEFAULT_NOISE_THRESHOLD = 0.01;
+const MIN_NOISE_THRESHOLD = 0.0005;
 let episodeSequence = 0;
 
 function episodeId() {
@@ -11,8 +13,8 @@ function bounded(value, fallback, min, max) {
 }
 
 export class NoiseDetector {
-  constructor({ threshold = 0.06, quietMs = 5000, snapshotIntervalMs = 30000, minNoiseMs = 150 } = {}) {
-    this.threshold = 0.06;
+  constructor({ threshold = DEFAULT_NOISE_THRESHOLD, quietMs = 5000, snapshotIntervalMs = 30000, minNoiseMs = 150 } = {}) {
+    this.threshold = DEFAULT_NOISE_THRESHOLD;
     this.quietMs = 5000;
     this.snapshotIntervalMs = 30000;
     this.minNoiseMs = bounded(minNoiseMs, 150, 0, 10000);
@@ -27,7 +29,7 @@ export class NoiseDetector {
 
   updateSettings(settings = {}) {
     const previousThreshold = this.threshold;
-    this.threshold = bounded(settings.threshold, this.threshold, 0.005, 0.5);
+    this.threshold = bounded(settings.threshold, this.threshold, MIN_NOISE_THRESHOLD, 0.5);
     this.quietMs = bounded(settings.quietMs, this.quietMs, 1, 60000);
     this.snapshotIntervalMs = bounded(settings.snapshotIntervalMs, this.snapshotIntervalMs, 10000, 300000);
     if (this.threshold !== previousThreshold) this.candidateAt = null;

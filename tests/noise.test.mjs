@@ -16,6 +16,26 @@ function test(name, run) {
 }
 const make = (settings = {}) => new NoiseDetector({ threshold: 0.06, quietMs: 5000, snapshotIntervalMs: 30000, ...settings });
 
+test('maximum sensitivity detects sustained quiet sound below the old threshold floor', () => {
+  const detector = make({ threshold: 0.0005 });
+  assert.equal(detector.process(0.002, 0), null);
+  assert.equal(detector.process(0.002, 149), null);
+  assert.ok(detector.process(0.002, 150), 'quiet sound must qualify after 150ms');
+});
+
+test('maximum sensitivity still ignores silence, sub-threshold sound and short clicks', () => {
+  const detector = make({ threshold: 0.0005 });
+  for (const [level, time] of [[0, 0], [0.0002, 200], [0.0002, 500], [0.002, 600], [0.002, 749], [0, 750]]) {
+    assert.equal(detector.process(level, time), null);
+  }
+});
+
+test('default sensitivity detects ordinary sound without requiring the old loud level', () => {
+  const detector = new NoiseDetector();
+  detector.process(0.02, 0);
+  assert.ok(detector.process(0.02, 150));
+});
+
 test('short transients and silence do not create events', () => {
   const detector = make();
   for (const [level, time] of [[0, 0], [0.4, 10], [0.4, 159], [0, 160], [0.4, 200], [0, 340], [0, 6000]]) {

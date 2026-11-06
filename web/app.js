@@ -1,4 +1,5 @@
 import { createMonitor } from './media.js';
+import { DEFAULT_NOISE_THRESHOLD } from './noise.js';
 
 const APP_BASE = new URL('./', import.meta.url);
 
@@ -10,7 +11,7 @@ let authView = 'login';
 let authEpoch = 0;
 let authRefreshSequence = 0;
 let identityBusy = false;
-const DEFAULT_SETTINGS = { threshold: 0.06, quietMs: 5000, snapshotIntervalMs: 30000 };
+const DEFAULT_SETTINGS = { threshold: DEFAULT_NOISE_THRESHOLD, quietMs: 5000, snapshotIntervalMs: 30000 };
 const photoCache = new Map();
 let bindings = readBindings();
 let active = null;
@@ -33,6 +34,7 @@ let historySignature = '';
 let historyLimit = 12;
 let settingsLoaded = false;
 let settingsDirty = false;
+let sensitivityDirty = false;
 let latestPhoto = null;
 let photoEpoch = 0;
 let liveFrameURL = null;
@@ -348,6 +350,7 @@ async function releaseRoom() {
   historyLimit = 12;
   settingsLoaded = false;
   settingsDirty = false;
+  sensitivityDirty = false;
   latestPhoto = null;
   try { if (previous) await previous.destroy(); } catch (_) { /* Teardown remains local when the server is unavailable. */ }
 }
@@ -585,19 +588,17 @@ function renderMedia() {
 }
 
 function fillSettings(settings) {
-  const range = Math.round(1 + 99 * Math.log(0.5 / settings.threshold) / Math.log(100));
-  $('sensitivity').value = String(Math.max(1, Math.min(100, range)));
+  const threshold = settings.threshold > 0 ? settings.threshold : DEFAULT_NOISE_THRESHOLD;
+  const options = [...$('sensitivity').options];
+  // Legacy slider values use the nearest preset on the same logarithmic scale.
+  const distance = option => Math.abs(Math.log(Number(option.value) / threshold));
+  $('sensitivity').value = options.reduce((nearest, option) => distance(option) < distance(nearest) ? option : nearest).value;
+  sensitivityDirty = false;
   const select = $('snapshot-interval');
   if (![...select.options].some((option) => Number(option.value) === settings.snapshotIntervalMs)) {
     select.add(new Option(`${settings.snapshotIntervalMs / 1000} секунд`, String(settings.snapshotIntervalMs)));
   }
   select.value = String(settings.snapshotIntervalMs);
-  renderSensitivity();
-}
-
-function renderSensitivity() {
-  const value = Number($('sensitivity').value);
-  $('sensitivity-value').textContent = value < 34 ? 'Низкая' : value < 70 ? 'Средняя' : 'Высокая';
 }
 
 async function loadDevices() {
@@ -877,24 +878,27 @@ $('viewer-form').addEventListener('submit', async (event) => {
   catch (error) { showError(error.message, true); }
 });
 $('capture-button').addEventListener('click', () => void toggleCapture());
-$('sensitivity').addEventListener('input', () => { settingsDirty = true; renderSensitivity(); $('settings-feedback').textContent = 'Есть несохранённые изменения'; });
+$('sensitivity').addEventListener('change', () => { settingsDirty = true; sensitivityDirty = true; $('settings-feedback').textContent = 'Есть несохранённые изменения'; });
 $('snapshot-interval').addEventListener('change', () => { settingsDirty = true; $('settings-feedback').textContent = 'Есть несохранённые изменения'; });
 $('settings-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!api || !active || active.role !== 'host') return;
   const current = generation;
-  $('save-settings').disabled = true;
+  const controls = ['save-settings', 'sensitivity', 'snapshot-interval'].map($);
+  for (const control of controls) control.disabled = true;
   try {
-    const threshold = Number((0.5 * Math.pow(0.01, (Number($('sensitivity').value) - 1) / 99)).toFixed(5));
+    // Saving only the photo interval must not silently replace a legacy threshold.
+    const threshold = sensitivityDirty ? Number($('sensitivity').value) : (room?.settings?.threshold ?? DEFAULT_NOISE_THRESHOLD);
     const settings = await api.put('/settings', { threshold, snapshotIntervalMs: Number($('snapshot-interval').value) });
     if (current !== generation) return;
     if (room) room.settings = settings;
     monitor.updateSettings(settings);
     settingsDirty = false;
+    fillSettings(settings);
     $('settings-feedback').textContent = 'Настройки сохранены';
     toast('Настройки наблюдения сохранены');
   } catch (error) { if (current === generation) showError(error.message); }
-  finally { $('save-settings').disabled = false; }
+  finally { for (const control of controls) control.disabled = false; }
 });
 $('copy-link').addEventListener('click', () => void copyLink());
 $('regenerate-key').addEventListener('click', async () => {

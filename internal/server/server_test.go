@@ -108,6 +108,35 @@ func setup(t *testing.T) *fixture {
 	}
 	return f
 }
+func TestNoiseSensitivitySettingsPersistAcrossRestart(t *testing.T) {
+	for _, threshold := range []float64{0.0005, 0.06, 0.5} {
+		t.Run(fmt.Sprint(threshold), func(t *testing.T) {
+			f := setup(t)
+			if got := f.state()["settings"].(map[string]any)["threshold"]; got != 0.01 {
+				t.Errorf("new room threshold = %v, want 0.01", got)
+			}
+			f.call("PUT", f.path("/settings"), f.host, map[string]any{"threshold": threshold, "snapshotIntervalMs": 30000}, 200)
+			for _, invalid := range []float64{0.00049, 0, 0.50001} {
+				f.call("PUT", f.path("/settings"), f.host, map[string]any{"threshold": invalid, "snapshotIntervalMs": 30000}, 400)
+				if got := f.state()["settings"].(map[string]any)["threshold"]; got != threshold {
+					t.Fatalf("rejected threshold %v changed setting to %v", invalid, got)
+				}
+			}
+			if err := f.s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			next, err := New(Config{DataDir: f.dir, RoomCreationKey: testOwnerKey, Now: func() time.Time { return f.now }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.s = next
+			if got := f.state()["settings"].(map[string]any)["threshold"]; got != threshold {
+				t.Fatalf("reloaded room threshold = %v, want %v", got, threshold)
+			}
+		})
+	}
+}
+
 func (f *fixture) path(s string) string { return "/api/rooms/" + f.room + s }
 func (f *fixture) call(method, path, token string, body any, status int) *httptest.ResponseRecorder {
 	f.t.Helper()
@@ -437,7 +466,7 @@ func TestFailedPersistenceDoesNotMutateLiveStateOrLeakPhoto(t *testing.T) {
 	f.call("PUT", f.path("/settings"), f.host, map[string]any{"threshold": 0.4, "snapshotIntervalMs": 10000}, 500)
 	f.call("POST", f.path("/events"), f.host, map[string]any{"sessionId": "test-camera", "episodeId": "failed", "level": 0.2, "photo": photo(40)}, 500)
 	state := f.state()
-	if state["settings"].(map[string]any)["threshold"] != 0.06 || state["eventCount"] != float64(0) {
+	if state["settings"].(map[string]any)["threshold"] != 0.01 || state["eventCount"] != float64(0) {
 		t.Fatal("failed save changed live data", state)
 	}
 	photos, err := filepath.Glob(filepath.Join(f.dir, "photos", "*.jpg"))

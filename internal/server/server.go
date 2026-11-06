@@ -51,6 +51,12 @@ type Config struct {
 	TURNPassword string
 }
 
+const (
+	minNoiseThreshold     = 0.0005
+	maxNoiseThreshold     = 0.5
+	defaultNoiseThreshold = 0.01
+)
+
 type Settings struct {
 	Threshold          float64 `json:"threshold"`
 	QuietMS            int     `json:"quietMs"`
@@ -319,7 +325,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request, ownerID stri
 		fail(w, 500, "Не удалось создать ключ")
 		return
 	}
-	room := &room{OwnerID: ownerID, OwnerApproved: true, ID: id, Name: body.Name, CreatedAt: now, HostHash: tokenHash(host), ViewerHash: tokenHash(viewer), PairingVersion: 1, Settings: Settings{Threshold: 0.06, QuietMS: 5000, SnapshotIntervalMS: 30000}, Events: []storedEvent{}}
+	room := &room{OwnerID: ownerID, OwnerApproved: true, ID: id, Name: body.Name, CreatedAt: now, HostHash: tokenHash(host), ViewerHash: tokenHash(viewer), PairingVersion: 1, Settings: Settings{Threshold: defaultNoiseThreshold, QuietMS: 5000, SnapshotIntervalMS: 30000}, Events: []storedEvent{}}
 	if err = s.save(room); err != nil {
 		fail(w, 500, "Не удалось сохранить комнату")
 		return
@@ -353,7 +359,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request, current 
 	if !readJSON(w, r, 4096, &body) {
 		return
 	}
-	if body.Threshold == nil || body.SnapshotIntervalMS == nil || *body.Threshold < 0.005 || *body.Threshold > 0.5 || *body.SnapshotIntervalMS < 10000 || *body.SnapshotIntervalMS > 300000 {
+	if body.Threshold == nil || body.SnapshotIntervalMS == nil || *body.Threshold < minNoiseThreshold || *body.Threshold > maxNoiseThreshold || *body.SnapshotIntervalMS < 10000 || *body.SnapshotIntervalMS > 300000 {
 		fail(w, 400, "Некорректный порог или интервал фотографий")
 		return
 	}
