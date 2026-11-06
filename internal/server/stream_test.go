@@ -34,7 +34,7 @@ func (f *streamFixture) dial() *websocket.Conn {
 	f.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
-	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(f.http.URL, "http")+f.path("/stream"), &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{f.http.URL}}})
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(f.http.URL, "http")+f.path("/stream"), &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{f.http.URL}, "Cookie": []string{f.ensureCookie().String()}}})
 	if err != nil {
 		f.t.Fatalf("WebSocket upgrade: %v", err)
 	}
@@ -96,7 +96,7 @@ func (f *streamFixture) auth(role, session string) *websocket.Conn {
 	c := f.dial()
 	token := f.viewer
 	if role == "host" {
-		token = f.host
+		token = ""
 	}
 	wsSend(f.t, c, map[string]any{"type": "auth", "role": role, "token": token, "sessionId": session})
 	if got := wsJSON(f.t, c, "ready"); got["role"] != role {
@@ -154,15 +154,18 @@ func TestStreamAuthRejectsInvalidCredentialsAndRoles(t *testing.T) {
 		name, role, token, session string
 		status                     int
 	}{
-		{"bad key", "viewer", "wrong", "", 401}, {"viewer as host", "host", "viewer", "camera", 403}, {"host as viewer", "viewer", "host", "", 403}, {"invalid role", "admin", "host", "", 400}, {"missing session", "host", "host", "", 400}, {"unknown session", "host", "host", "unknown", 403},
+		{"bad key", "viewer", "wrong", "", 401}, {"viewer as host", "host", "viewer", "camera", 403}, {"old host key", "viewer", "old-host", "", 401}, {"invalid role", "admin", "host", "", 400}, {"missing session", "host", "host", "", 400}, {"unknown session", "host", "host", "unknown", 403},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := setupStream(t)
 			f.beat("camera", true, false)
 			c := f.dial()
 			token := tc.token
-			if token == "host" {
+			if token == "old-host" {
 				token = f.host
+			}
+			if token == "host" {
+				token = ""
 			}
 			if token == "viewer" {
 				token = f.viewer
@@ -253,7 +256,7 @@ func TestStreamPauseResumeAndTerminalStop(t *testing.T) {
 		t.Fatal(state)
 	}
 	c := f.dial()
-	wsSend(t, c, map[string]any{"type": "auth", "role": "host", "token": f.host, "sessionId": "camera"})
+	wsSend(t, c, map[string]any{"type": "auth", "role": "host", "token": "", "sessionId": "camera"})
 	if e := wsJSON(t, c, "error"); e["status"] != float64(403) {
 		t.Fatal(e)
 	}

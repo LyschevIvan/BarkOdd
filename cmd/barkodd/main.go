@@ -48,6 +48,7 @@ func readOptions(getenv func(string) string) (options, error) {
 		return items
 	}
 	o.server = server.Config{
+		AuthMode: value("AUTH_MODE", "admin_code"), AdminCode: getenv("ADMIN_CODE"),
 		RoomCreationKey: getenv("ROOM_CREATION_KEY"), DataDir: value("DATA_DIR", "data"), PublicURL: getenv("PUBLIC_URL"),
 		MediaTransport: value("MEDIA_TRANSPORT", "websocket"),
 		STUNURLs:       list("STUN_URLS"), TURNURLs: list("TURN_URLS"),

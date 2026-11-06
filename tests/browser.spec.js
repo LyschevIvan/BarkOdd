@@ -1,5 +1,17 @@
 import { test, expect } from '@playwright/test';
 
+const authMode = process.env.BARKODD_AUTH_MODE || 'admin_code';
+async function loginOwner(page) {
+  await page.goto('./');
+  if (authMode !== 'none') {
+    if (authMode === 'multi_user') await page.locator('#admin-login-toggle').click();
+    await page.locator('#login-code').fill(process.env.BARKODD_OWNER_KEY || 'test-owner-key-0123456789abcdef0123456789');
+    await page.locator('#code-form button[type=submit]').click();
+  }
+  await expect(page.locator('#account-panel')).toBeVisible();
+}
+const savedHost = page => page.evaluate(() => JSON.parse(localStorage.getItem('barkodd.account.v2.' + document.querySelector('#account-tools').dataset.userId)).host);
+
 const transport = process.env.BARKODD_TRANSPORT || 'websocket';
 const rtc = transport === 'webrtc';
 const liveSelector = rtc ? '#remote-video' : '#live-frame';
@@ -54,14 +66,13 @@ test(`${transport}: on-demand video, photos, pause, reconnect and revocation`, a
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await instrument(page);
-  await page.goto('./');
+  await loginOwner(page);
   await page.locator('#choose-host').click();
   await page.locator('#room-name').fill(`Дом Бруно · ${transport}`);
-  await page.locator('#creation-key').fill(process.env.BARKODD_OWNER_KEY || 'test-owner-key-0123456789abcdef0123456789');
   await page.locator('#host-form button[type=submit]').click();
   await expect(page.locator('#pairing-qr')).toBeVisible();
-  const binding = await page.evaluate(() => JSON.parse(localStorage.getItem('barkodd.binding.v1')).host);
-  const initialState = await page.request.get(roomURL(baseURL, binding.id), { headers: { Authorization: `Bearer ${binding.hostToken}` } });
+  const binding = await savedHost(page);
+  const initialState = await page.request.get(roomURL(baseURL, binding.id), {});
   expect((await initialState.json()).mediaTransport).toBe(transport);
   const viewerURL = new URL(`?role=viewer#room=${encodeURIComponent(binding.id)}&key=${encodeURIComponent(binding.viewerToken)}`, baseURL).href;
   await page.locator('#capture-button').click();
@@ -108,7 +119,7 @@ test(`${transport}: on-demand video, photos, pause, reconnect and revocation`, a
   await expectFrame(viewer);
 
   // Browser microphone suspension can recover in the same room and session.
-  const state = async () => (await page.request.get(roomURL(baseURL, binding.id), { headers: { Authorization: `Bearer ${binding.hostToken}` } })).json();
+  const state = async () => (await page.request.get(roomURL(baseURL, binding.id), {})).json();
   await page.evaluate(() => window.__audioContexts.at(-1).suspend());
   await expect.poll(async () => (await state()).monitoring).toBe(false);
   await expect(viewer.locator(liveSelector)).toBeHidden();
@@ -137,11 +148,12 @@ test(`${transport}: on-demand video, photos, pause, reconnect and revocation`, a
     const peers = await page.evaluate(() => { window.__oldPeers = window.__peers.filter(peer => peer.connectionState === 'connected'); return window.__oldPeers.length; });
     expect(peers).toBeGreaterThan(0);
   }
+  page.once('dialog', dialog => dialog.accept());
   await page.locator('#regenerate-key').click();
   if (rtc) await expect.poll(() => page.evaluate(() => window.__oldPeers.every(peer => peer.connectionState === 'closed')), { timeout: 4000 }).toBe(true);
   await expect.poll(() => viewer.evaluate(() => window.__oldSockets.every(socket => socket.readyState === WebSocket.CLOSED)), { timeout: 6000 }).toBe(true);
   await viewer.unroute('**/api/**');
-  const renewed = await page.evaluate(() => JSON.parse(localStorage.getItem('barkodd.binding.v1')).host.viewerToken);
+  const renewed = (await savedHost(page)).viewerToken;
   expect(renewed).not.toBe(binding.viewerToken);
   await viewer.goto(new URL(`?role=viewer#room=${binding.id}&key=${renewed}`, baseURL).href);
   await viewer.locator('#capture-button').click();
@@ -162,34 +174,36 @@ test('invalid pairing has a recovery screen', async ({ page }) => {
   await instrument(page);
   await page.goto('./?role=viewer#room=missing&key=invalid');
   await expect(page.locator('#welcome-alert')).toBeVisible();
-  await expect(page.locator('#choose-host')).toBeVisible();
+  await expect(page.locator('#choose-viewer')).toBeVisible();
 });
 
-test('creation requires the owner key and never persists it in browser bindings', async ({ page, baseURL }) => {
-  const anonymous = await page.request.post(new URL('api/rooms', baseURL).href, { data: { name: 'Anonymous' } });
-  expect(anonymous.status()).toBe(403);
+test('protected creation requires a session and never persists the code', async ({ page, baseURL }) => {
+  test.skip(authMode === 'none');
+  const anonymous = await page.request.post(new URL('api/rooms', baseURL).href, { data: { name: 'Anonymous' }, headers: { Origin: new URL(baseURL).origin } });
+  expect([401, 403]).toContain(anonymous.status());
   await page.goto('./');
+  if (authMode === 'multi_user') await page.locator('#admin-login-toggle').click();
+  await page.locator('#login-code').fill('wrong-owner-key-0123456789abcdef0123456789');
+  await page.locator('#code-form button[type=submit]').click();
+  await expect(page.locator('#welcome-alert')).toBeVisible();
+  await expect(page.locator('#login-code')).toHaveValue('');
+  const key = process.env.BARKODD_OWNER_KEY || 'test-owner-key-0123456789abcdef0123456789';
+  await page.locator('#login-code').fill(key);
+  await page.locator('#code-form button[type=submit]').click();
+  await expect(page.locator('#account-panel')).toBeVisible();
   await page.locator('#choose-host').click();
   await page.locator('#room-name').fill('Owner authorization');
-  await page.locator('#creation-key').fill('wrong-owner-key-0123456789abcdef0123456789');
-  await page.locator('#host-form button[type=submit]').click();
-  await expect(page.locator('#welcome-alert')).toContainText('ключ');
-  await expect(page.locator('#creation-key')).toHaveValue('');
-  const key = process.env.BARKODD_OWNER_KEY || 'test-owner-key-0123456789abcdef0123456789';
-  await page.locator('#creation-key').fill(key);
   await page.locator('#host-form button[type=submit]').click();
   await expect(page.locator('#dashboard')).toBeVisible();
-  await expect(page.locator('#creation-key')).toHaveValue('');
   expect(await page.evaluate(() => JSON.stringify({ ...localStorage }))).not.toContain(key);
   expect(page.url()).not.toContain(key);
 });
 
 test('replacing the source stops the previous camera and keeps its room binding', async ({ page, context }) => {
   await instrument(page);
-  await page.goto('./');
+  await loginOwner(page);
   await page.locator('#choose-host').click();
   await page.locator('#room-name').fill('Replacement privacy');
-  await page.locator('#creation-key').fill(process.env.BARKODD_OWNER_KEY || 'test-owner-key-0123456789abcdef0123456789');
   await page.locator('#host-form button[type=submit]').click();
   await expect(page.locator('#dashboard')).toBeVisible();
   await page.locator('#capture-button').click();
@@ -202,25 +216,24 @@ test('replacing the source stops the previous camera and keeps its room binding'
   await replacement.locator('#capture-button').click();
   await expect.poll(() => replacement.locator('#camera-video').evaluate(v => !!v.srcObject)).toBe(true);
   await expect.poll(() => page.evaluate(() => window.__oldCaptureTracks.every(t => t.readyState === 'ended'))).toBe(true);
-  expect(await page.evaluate(() => !!JSON.parse(localStorage.getItem('barkodd.binding.v1')).host?.hostToken)).toBe(true);
+  expect((await savedHost(page)).account).toBe(true);
   await replacement.locator('#capture-button').click();
   await replacement.close();
 });
 
 test('room deletion needs confirmation and removes its binding', async ({ page, baseURL }) => {
-  await page.goto('./');
+  await loginOwner(page);
   await page.locator('#choose-host').click();
   await page.locator('#room-name').fill('Deletion test');
-  await page.locator('#creation-key').fill(process.env.BARKODD_OWNER_KEY || 'test-owner-key-0123456789abcdef0123456789');
   await page.locator('#host-form button[type=submit]').click();
   await expect(page.locator('#delete-room')).toBeVisible();
-  const binding = await page.evaluate(() => JSON.parse(localStorage.getItem('barkodd.binding.v1')).host);
+  const binding = await savedHost(page);
   page.once('dialog', dialog => dialog.dismiss());
   await page.locator('#delete-room').click();
-  expect((await page.request.get(roomURL(baseURL, binding.id), { headers: { Authorization: `Bearer ${binding.hostToken}` } })).status()).toBe(200);
+  expect((await page.request.get(roomURL(baseURL, binding.id), {})).status()).toBe(200);
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#delete-room').click();
   await expect(page.locator('#welcome')).toBeVisible();
-  expect((await page.request.get(roomURL(baseURL, binding.id), { headers: { Authorization: `Bearer ${binding.hostToken}` } })).status()).toBe(404);
-  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('barkodd.binding.v1')).host)).toBeNull();
+  expect((await page.request.get(roomURL(baseURL, binding.id), {})).status()).toBe(404);
+  expect(await savedHost(page)).toBeNull();
 });

@@ -199,6 +199,7 @@ func (s *Server) cleanupLoop() {
 		case <-ticker.C:
 			s.mu.Lock()
 			if !s.closed {
+				s.expireSessionsLocked()
 				if err := s.sweep(); err != nil {
 					log.Printf("BarkOdd history cleanup: %v", err)
 				}

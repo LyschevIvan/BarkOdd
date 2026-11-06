@@ -3,7 +3,13 @@ import { createMonitor } from './media.js';
 const APP_BASE = new URL('./', import.meta.url);
 
 const $ = (id) => document.getElementById(id);
-const STORAGE_KEY = 'barkodd.binding.v1';
+const GUEST_STORAGE_KEY = 'barkodd.guest.v2';
+let auth = { mode: null, user: null };
+let authTimer = null;
+let authView = 'login';
+let authEpoch = 0;
+let authRefreshSequence = 0;
+let identityBusy = false;
 const DEFAULT_SETTINGS = { threshold: 0.06, quietMs: 5000, snapshotIntervalMs: 30000 };
 const photoCache = new Map();
 let bindings = readBindings();
@@ -39,26 +45,135 @@ class APIError extends Error {
   constructor(message, status) { super(message); this.status = status; }
 }
 
+function authActor() { return { epoch: authEpoch, id: auth.user?.id || null }; }
+function sameActor(actor) { return actor.epoch === authEpoch && actor.id === (auth.user?.id || null); }
+function beginIdentityChange() { authEpoch += 1; return authActor(); }
+function setIdentityBusy(value) {
+  identityBusy = value;
+  for (const selector of ['#code-form button', '#login-form button', '#register-form button', '#password-form button', '#logout']) {
+    document.querySelector(selector).disabled = value;
+  }
+}
+function storageKey() { return auth.user ? `barkodd.account.v2.${auth.user.id}` : GUEST_STORAGE_KEY; }
+function emptyBindings() { return { role: null, host: null, viewer: null, rooms: {} }; }
 function readBindings() {
   try {
-    const data = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
-    const valid = (entry, role) => entry && typeof entry.id === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(entry.id) && typeof entry[role === 'host' ? 'hostToken' : 'viewerToken'] === 'string';
-    return { role: data.role === 'host' || data.role === 'viewer' ? data.role : null, host: valid(data.host, 'host') ? data.host : null, viewer: valid(data.viewer, 'viewer') ? data.viewer : null };
-  } catch (_) { return { role: null, host: null, viewer: null }; }
+    const data = JSON.parse(localStorage.getItem(storageKey()) || '{}');
+    const valid = entry => entry && typeof entry.id === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(entry.id) && (entry.account === true ? !!auth.user : typeof entry.viewerToken === 'string');
+    const clean = entry => valid(entry) ? { id: entry.id, ...(entry.account ? { account: true } : {}), ...(typeof entry.viewerToken === 'string' ? { viewerToken: entry.viewerToken } : {}) } : null;
+    const rooms = {};
+    if (auth.user && data.rooms && typeof data.rooms === 'object') for (const entry of Object.values(data.rooms)) { const binding = clean(entry); if (binding?.account) rooms[binding.id] = binding; }
+    return { role: ['host', 'viewer'].includes(data.role) ? data.role : null, host: clean(data.host), viewer: clean(data.viewer), rooms };
+  } catch (_) { return emptyBindings(); }
 }
-
 function saveBindings() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(bindings)); }
+  try { localStorage.setItem(storageKey(), JSON.stringify(bindings)); }
   catch (_) { toast('Браузер не разрешил сохранить привязку. После перезагрузки понадобится ссылка.'); }
 }
+function saveGuest(binding) {
+  try { localStorage.setItem(GUEST_STORAGE_KEY, JSON.stringify({ role: 'viewer', viewer: binding })); localStorage.setItem('barkodd.guest-active.v2', 'true'); }
+  catch (_) { /* Guest links remain usable without browser storage. */ }
+}
+function renderAccount() {
+  const user = auth.user;
+  $('account-tools').hidden = !user;
+  $('account-tools').dataset.userId = user?.id || '';
+  $('account-name').textContent = auth.mode === 'none' ? 'Общий кабинет' : user?.username || '';
+  $('logout').hidden = auth.mode === 'none';
+  $('password-toggle').hidden = !user || user.role !== 'user';
+  $('auth-panel').hidden = !!user || !auth.mode || auth.mode === 'none';
+  $('account-panel').hidden = !user;
+  $('choose-host').hidden = !user;
+  $('users-toggle').hidden = auth.mode !== 'multi_user' || user?.role !== 'admin';
+  $('auth-tabs').hidden = auth.mode !== 'multi_user';
+  $('auth-description').textContent = auth.mode === 'multi_user' ? 'Войдите или зарегистрируйтесь. Гостевые ссылки открываются без входа.' : 'Код владельца нужен только для входа. Гостевые ссылки открываются без входа.';
+  $('code-form').hidden = !!user || !(auth.mode === 'admin_code' || authView === 'admin');
+  $('login-form').hidden = !!user || auth.mode !== 'multi_user' || authView !== 'login';
+  $('register-form').hidden = !!user || auth.mode !== 'multi_user' || authView !== 'register';
+  $('password-panel').hidden = true;
+  if (!user) { $('owned-rooms').replaceChildren(); $('users-list').replaceChildren(); $('users-panel').hidden = true; }
+}
+async function loadRooms() {
+  if (!auth.user) return;
+  const actor = authActor();
+  const navigation = navigationSequence;
+  try {
+    const data = await request('api/rooms');
+    if (!sameActor(actor) || navigation !== navigationSequence) return;
+    $('owned-rooms').replaceChildren();
+    $('rooms-empty').hidden = data.rooms.length > 0;
+    for (const entry of data.rooms) {
+      const card = textElement('article', 'owned-room', '');
+      const info = textElement('div', 'room-info', '');
+      info.append(textElement('h3', '', entry.name), textElement('p', 'field-hint', entry.monitoring ? 'Наблюдение включено' : entry.online ? 'Устройство в сети' : 'Устройство не в сети'));
+      const actions = textElement('div', 'account-actions', '');
+      for (const [role, label] of [['host', 'Устройство питомца'], ['viewer', 'Просмотр']]) {
+        const button = textElement('button', 'button button-secondary', label);
+        button.type = 'button';
+        button.addEventListener('click', () => void openRoom(role, bindings.rooms[entry.id] || { id: entry.id, account: true }, actor));
+        actions.append(button);
+      }
+      card.append(info, actions);
+      $('owned-rooms').append(card);
+    }
+  } catch (error) {
+    if (!sameActor(actor) || navigation !== navigationSequence) return;
+    if ([401, 403].includes(error.status)) await loseAccount(undefined, actor);
+    else showError(error.message, true);
+  }
+}
+async function loseAccount(message = 'Сессия завершена. Войдите снова, чтобы открыть свои комнаты.', actor = authActor()) {
+  if (!sameActor(actor) || !auth.user) return;
+  beginIdentityChange();
+  auth.user = null;
+  authView = 'login';
+  bindings = readBindings();
+  renderAccount();
+  await showWelcome(message);
+}
+async function refreshAuth() {
+  if (identityBusy) return;
+  const actor = authActor();
+  const sequence = ++authRefreshSequence;
+  try {
+    const state = await request('api/auth');
+    if (!sameActor(actor) || sequence !== authRefreshSequence || identityBusy) return;
+    if (state.user?.id === auth.user?.id && state.mode === auth.mode) return;
+    beginIdentityChange();
+    auth = state;
+    authView = 'login';
+    bindings = readBindings();
+    renderAccount();
+    // Guest QR access stays independent from a revoked account session.
+    if (active && !active.binding.account) return;
+    await showWelcome(state.user ? '' : 'Сессия завершена. Войдите снова, чтобы открыть свои комнаты.');
+  } catch (_) { /* Room polling reports temporary network loss. */ }
+}
+async function authenticate(form, path, body) {
+  if (identityBusy) return;
+  const actor = beginIdentityChange();
+  setIdentityBusy(true);
+  for (const input of form.querySelectorAll('input[type=password]')) input.value = '';
+  showError('', true);
+  try {
+    const result = await request(path, { method: 'POST', body });
+    if (!sameActor(actor)) return;
+    beginIdentityChange();
+    auth.user = result.user;
+    bindings = readBindings();
+    renderAccount();
+    await showWelcome();
+  } catch (error) { if (sameActor(actor)) showError(error.message, true); }
+  finally { setIdentityBusy(false); }
+}
 
-async function request(url, { method = 'GET', body, token, ownerKey, blob = false } = {}) {
+async function request(url, { method = 'GET', body, token, blob = false, actorID = !token && !url.startsWith('api/auth') ? auth.user?.id : null } = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
     const headers = {};
     if (token) headers.Authorization = `Bearer ${token}`;
-    if (ownerKey) headers['X-BarkOdd-Owner-Key'] = ownerKey;
+    if (actorID) headers['X-BarkOdd-User'] = actorID;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     const response = await fetch(new URL(url, APP_BASE), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal, cache: 'no-store', credentials: 'same-origin', referrerPolicy: 'no-referrer' });
     if (!response.ok) {
@@ -75,17 +190,22 @@ async function request(url, { method = 'GET', body, token, ownerKey, blob = fals
 }
 
 function roomAPI(binding, role) {
+  const actor = authActor();
   const base = `api/rooms/${encodeURIComponent(binding.id)}`;
-  const token = role === 'host' ? binding.hostToken : binding.viewerToken;
+  const token = binding.account ? '' : binding.viewerToken;
+  const call = (path, options = {}) => request(base + path, { ...options, token, actorID: binding.account ? actor.id : null }).catch(error => {
+    if (error.status === 401 && sameActor(actor) && active?.binding === binding) void invalidateSession(error);
+    throw error;
+  });
   const streamURL = new URL(`${base}/stream`, APP_BASE);
   streamURL.protocol = streamURL.protocol === 'https:' ? 'wss:' : 'ws:';
   return {
     streamURL: streamURL.href,
     token,
-    get: (path = '') => request(base + path, { token }),
-    post: (path, body) => request(base + path, { method: 'POST', body, token }),
-    put: (path, body) => request(base + path, { method: 'PUT', body, token }),
-    blob: (path, body) => request(base + path, { method: body === undefined ? 'GET' : 'POST', body, token, blob: true }),
+    get: (path = '') => call(path),
+    post: (path, body) => call(path, { method: 'POST', body }),
+    put: (path, body) => call(path, { method: 'PUT', body }),
+    blob: (path, body) => call(path, { method: body === undefined ? 'GET' : 'POST', body, blob: true }),
   };
 }
 
@@ -233,9 +353,10 @@ async function releaseRoom() {
 }
 
 async function showWelcome(message = '') {
+  const actor = authActor();
   const navigation = ++navigationSequence;
   await releaseRoom();
-  if (navigation !== navigationSequence) return;
+  if (navigation !== navigationSequence || !sameActor(actor)) return;
   $('dashboard').hidden = true;
   $('welcome').hidden = false;
   $('switch-role').hidden = true;
@@ -245,20 +366,22 @@ async function showWelcome(message = '') {
   $('forget-binding').hidden = !bindings.host && !bindings.viewer;
   showError(message, true);
   document.title = 'BarkOdd — рядом, даже издалека';
+  renderAccount();
+  if (auth.user) await loadRooms();
 }
 
 async function invalidateSession(error) {
   if (!active) return;
+  if (active.binding.account && error.status !== 404) { await loseAccount(); return; }
   const role = active.role;
-  bindings[role] = null;
-  bindings.role = null;
-  saveBindings();
+  if (active.binding.account) { delete bindings.rooms[active.binding.id]; bindings[role] = null; bindings.role = null; saveBindings(); }
+  else { try { localStorage.removeItem(GUEST_STORAGE_KEY); } catch (_) {} if (!auth.user) bindings = emptyBindings(); }
   await showWelcome(error.status === 404 ? 'Комната не найдена. Создайте новую комнату или получите актуальную ссылку.' : role === 'viewer' ? 'Ссылка больше не действует. На устройстве питомца получите новую ссылку или QR-код.' : 'Ключ управления больше не действует. Создайте новую комнату на этом устройстве.');
 }
 
 async function chooseRole(role) {
   showError('', true);
-  if (bindings[role]) { await openRoom(role, bindings[role]); return; }
+  if (role === 'host' && !auth.user) return;
   $('setup-panel').hidden = false;
   $('host-form').hidden = role !== 'host';
   $('viewer-form').hidden = role !== 'viewer';
@@ -268,16 +391,21 @@ async function chooseRole(role) {
   $('setup-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
-async function openRoom(role, binding) {
+async function openRoom(role, binding, actor = authActor()) {
+  if (!sameActor(actor) || binding.account && !auth.user || identityBusy) return;
   const navigation = ++navigationSequence;
   await releaseRoom();
-  if (navigation !== navigationSequence) return;
+  if (navigation !== navigationSequence || !sameActor(actor)) return;
   active = { role, binding };
   const current = generation;
   api = roomAPI(binding, role);
-  bindings[role] = binding;
-  bindings.role = role;
-  saveBindings();
+  if (binding.account) {
+    try { localStorage.removeItem('barkodd.guest-active.v2'); } catch (_) {}
+    bindings[role] = binding;
+    bindings.rooms[binding.id] = binding;
+    bindings.role = role;
+    saveBindings();
+  } else { saveGuest(binding); }
   serverReachable = true;
   $('welcome').hidden = true;
   $('dashboard').hidden = false;
@@ -349,7 +477,7 @@ async function openRoom(role, binding) {
     },
     onError(error) {
       if (generation !== current) return;
-      if (!error.sessionEnded && [401, 403, 404].includes(error.status)) { void invalidateSession(error); return; }
+      if ((!error.sessionEnded || error.status === 401) && [401, 403, 404].includes(error.status)) { void invalidateSession(error); return; }
       showError(error.message || 'Не удалось подключиться к камере. Попробуйте ещё раз.');
     },
   });
@@ -494,7 +622,7 @@ async function loadPairingQR() {
   const token = active.binding.viewerToken;
   $('qr-placeholder').hidden = false;
   $('pairing-qr').hidden = true;
-  $('qr-placeholder').textContent = token ? 'Готовим QR-код…' : 'Выпустите новую ссылку, чтобы получить QR-код.';
+  $('qr-placeholder').textContent = token ? 'Готовим QR-код…' : 'Создайте новую ссылку. Прежние гостевые ссылки перестанут работать.';
   $('copy-link').disabled = !token;
   if (!token) return;
   try {
@@ -508,7 +636,12 @@ async function loadPairingQR() {
   } catch (error) {
     if (current !== generation) return;
     $('qr-placeholder').textContent = 'QR-код не загрузился. Можно скопировать ссылку ниже.';
-    if (error.status === 403) $('qr-placeholder').textContent = 'Ключ просмотра изменился. Выпустите новую ссылку.';
+    if ([400, 403].includes(error.status) && active?.binding.account) {
+      delete active.binding.viewerToken;
+      saveBindings();
+      $('copy-link').disabled = true;
+      $('qr-placeholder').textContent = 'Ключ просмотра изменился. Создайте новую ссылку: прежние ссылки перестанут работать.';
+    }
   }
 }
 
@@ -672,36 +805,47 @@ async function copyLink() {
 $('choose-host').addEventListener('click', () => void chooseRole('host'));
 $('choose-viewer').addEventListener('click', () => void chooseRole('viewer'));
 $('switch-role').addEventListener('click', async () => {
+  try { localStorage.removeItem('barkodd.guest-active.v2'); } catch (_) {}
   bindings.role = null;
   saveBindings();
   await showWelcome();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 });
 $('forget-binding').addEventListener('click', async () => {
-  bindings = { role: null, host: null, viewer: null };
+  bindings = emptyBindings();
+  try { localStorage.removeItem(GUEST_STORAGE_KEY); } catch (_) {}
   saveBindings();
   await showWelcome();
   toast('Привязки удалены из этого браузера. Ссылки на комнаты продолжают действовать.');
 });
 $('host-form').addEventListener('submit', async (event) => {
   event.preventDefault();
+  if (!auth.user || identityBusy) return;
+  const actor = authActor();
+  const navigation = navigationSequence;
   const name = $('room-name').value.trim();
   if (!name) { showError('Дайте комнате название.', true); return; }
   const button = event.currentTarget.querySelector('button');
   button.disabled = true;
   showError('', true);
-  try { const binding = await request('api/rooms', { method: 'POST', body: { name }, token: $('creation-key').value }); await openRoom('host', binding); }
-  catch (error) { showError(error.message, !active); }
-  finally { $('creation-key').value = ''; button.disabled = false; }
+  try {
+    const result = await request('api/rooms', { method: 'POST', body: { name } });
+    if (!sameActor(actor) || navigation !== navigationSequence) return;
+    if (result.ownerId !== actor.id) { await refreshAuth(); return; }
+    await openRoom('host', { id: result.id, account: true, viewerToken: result.viewerToken }, actor);
+  } catch (error) {
+    if (!sameActor(actor) || navigation !== navigationSequence) return;
+    if (error.status === 401) await refreshAuth();
+    if (sameActor(actor) && navigation === navigationSequence) showError(error.message, !active);
+  }
+  finally { button.disabled = false; }
 });
 $('approval-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (active?.role !== 'host') return;
   const current = generation;
-  const key = $('approval-key').value;
-  $('approval-key').value = '';
   try {
-    await request(`api/rooms/${encodeURIComponent(active.binding.id)}/approval`, { method: 'POST', token: active.binding.hostToken, ownerKey: key });
+    await request(`api/rooms/${encodeURIComponent(active.binding.id)}/approval`, { method: 'POST', body: {} });
     if (current === generation) { await pollRoom(current); toast('Комната подтверждена владельцем.'); }
   } catch (error) { if (current === generation) showError(error.message); }
 });
@@ -709,13 +853,14 @@ $('delete-room').addEventListener('click', async () => {
   if (active?.role !== 'host') return;
   if (!window.confirm('Удалить комнату, всю историю и фотографии? Ссылки перестанут работать. Это действие нельзя отменить.')) return;
   const current = generation;
-  const { id, hostToken } = active.binding;
+  const { id } = active.binding;
   const button = $('delete-room');
   button.disabled = true;
   try {
     await monitor?.stopHost();
     if (current !== generation) return;
-    const result = await request(`api/rooms/${encodeURIComponent(id)}`, { method: 'DELETE', token: hostToken });
+    const result = await request(`api/rooms/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    delete bindings.rooms[id];
     for (const role of ['host', 'viewer']) { if (bindings[role]?.id === id) bindings[role] = null; }
     if (!bindings[bindings.role]) bindings.role = null;
     saveBindings();
@@ -754,6 +899,7 @@ $('settings-form').addEventListener('submit', async (event) => {
 $('copy-link').addEventListener('click', () => void copyLink());
 $('regenerate-key').addEventListener('click', async () => {
   if (!api || !active || active.role !== 'host') return;
+  if (!window.confirm('Создать новую гостевую ссылку? Все прежние ссылки и QR-коды перестанут работать.')) return;
   const current = generation;
   $('regenerate-key').disabled = true;
   try {
@@ -777,14 +923,153 @@ window.addEventListener('pageshow', (event) => {
   if (event.persisted && active) void openRoom(active.role, active.binding);
 });
 
+$('login-toggle').addEventListener('click', () => { authView = 'login'; renderAccount(); });
+$('register-toggle').addEventListener('click', () => { authView = 'register'; renderAccount(); });
+$('admin-login-toggle').addEventListener('click', () => { authView = 'admin'; renderAccount(); });
+$('code-form').addEventListener('submit', event => { event.preventDefault(); void authenticate(event.currentTarget, 'api/auth/login', { code: $('login-code').value }); });
+$('login-form').addEventListener('submit', event => { event.preventDefault(); void authenticate(event.currentTarget, 'api/auth/login', { username: $('login-username').value, password: $('login-password').value }); });
+$('register-form').addEventListener('submit', event => {
+  event.preventDefault();
+  if ($('register-password').value !== $('register-confirm').value) { showError('Пароли не совпадают.', true); return; }
+  void authenticate(event.currentTarget, 'api/auth/register', { username: $('register-username').value, password: $('register-password').value });
+});
+$('refresh-rooms').addEventListener('click', () => void loadRooms());
+$('logout').addEventListener('click', async () => {
+  if (identityBusy || !auth.user) return;
+  const actor = beginIdentityChange();
+  setIdentityBusy(true);
+  // Stop local capture immediately; the server revokes this session independently.
+  const teardown = releaseRoom();
+  try {
+    await request('api/auth/logout', { method: 'POST', body: {}, actorID: actor.id });
+    await teardown;
+    if (sameActor(actor)) await loseAccount('Вы вышли из аккаунта.', actor);
+  } catch (error) { if (sameActor(actor)) await showWelcome(error.message); }
+  finally { setIdentityBusy(false); }
+});
+$('password-toggle').addEventListener('click', async () => {
+  const actor = authActor();
+  if (active) await showWelcome();
+  if (sameActor(actor)) $('password-panel').hidden = !$('password-panel').hidden;
+});
+$('password-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (identityBusy || !auth.user) return;
+  const body = { currentPassword: $('current-password').value, newPassword: $('new-password').value };
+  $('current-password').value = ''; $('new-password').value = '';
+  const actor = beginIdentityChange();
+  setIdentityBusy(true);
+  try {
+    await request('api/auth/password', { method: 'POST', body, actorID: actor.id });
+    if (sameActor(actor)) await loseAccount('Пароль изменён. Войдите с новым паролем.', actor);
+  } catch (error) { if (sameActor(actor)) showError(error.message, true); }
+  finally { setIdentityBusy(false); }
+});
+async function loadUsers() {
+  const actor = authActor();
+  const navigation = navigationSequence;
+  const current = () => sameActor(actor) && navigation === navigationSequence;
+  const data = await request('api/admin/users');
+  if (!actor.id || !current()) return;
+  $('users-list').replaceChildren();
+  for (const user of data.users.filter(user => user.role === 'user')) {
+    const card = textElement('article', 'user-card', '');
+    card.append(textElement('h3', '', user.username), textElement('p', 'field-hint', user.disabled ? 'Учётная запись заблокирована' : 'Учётная запись активна'));
+    const toggle = textElement('button', 'button button-secondary', user.disabled ? 'Разблокировать' : 'Заблокировать');
+    toggle.type = 'button';
+    toggle.addEventListener('click', async () => {
+      if (!current()) return;
+      toggle.disabled = true;
+      try { await request(`api/admin/users/${encodeURIComponent(user.id)}`, { method: 'PUT', body: { disabled: !user.disabled }, actorID: actor.id }); if (current()) await loadUsers(); }
+      catch (error) { if (current()) { showError(error.message, true); toggle.disabled = false; } }
+    });
+    const form = textElement('form', 'input-action', '');
+    const input = document.createElement('input');
+    input.type = 'password'; input.minLength = 12; input.maxLength = 256; input.required = true; input.autocomplete = 'new-password'; input.placeholder = 'Новый пароль'; input.setAttribute('aria-label', `Новый пароль для ${user.username}`);
+    const reset = textElement('button', 'button button-secondary', 'Сбросить пароль'); reset.type = 'submit';
+    form.append(input, reset);
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      if (!current()) return;
+      const password = input.value; input.value = ''; reset.disabled = true;
+      try { await request(`api/admin/users/${encodeURIComponent(user.id)}/password`, { method: 'POST', body: { password }, actorID: actor.id }); if (current()) toast('Пароль сброшен. Сессии пользователя завершены.'); }
+      catch (error) { if (current()) showError(error.message, true); }
+      finally { if (current()) reset.disabled = false; }
+    });
+    card.append(toggle, form); $('users-list').append(card);
+  }
+}
+$('users-toggle').addEventListener('click', async () => {
+  const actor = authActor();
+  $('users-panel').hidden = !$('users-panel').hidden;
+  if (!$('users-panel').hidden) try { await loadUsers(); } catch (error) { if (sameActor(actor)) showError(error.message, true); }
+});
+
+function readSavedGuest() {
+  try {
+    if (localStorage.getItem('barkodd.guest-active.v2') !== 'true') return null;
+    const binding = JSON.parse(localStorage.getItem(GUEST_STORAGE_KEY) || '{}').viewer;
+    return binding && /^[a-zA-Z0-9_-]{1,128}$/.test(binding.id) && typeof binding.viewerToken === 'string' ? { id: binding.id, viewerToken: binding.viewerToken } : null;
+  } catch (_) { return null; }
+}
+
+function migrateLegacyBindings() {
+  const key = 'barkodd.binding.v1';
+  let legacy;
+  try { legacy = JSON.parse(localStorage.getItem(key) || 'null'); } catch (_) { return; }
+  if (!legacy) return;
+  const safe = entry => entry && typeof entry.id === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(entry.id) && typeof entry.viewerToken === 'string' && entry.viewerToken.length > 0 && entry.viewerToken.length <= 256;
+  const clean = entry => ({ id: entry.id, viewerToken: entry.viewerToken });
+  const recovery = { role: legacy.role === 'viewer' ? 'viewer' : null };
+  let copied = true;
+  if (safe(legacy.host)) {
+    recovery.host = clean(legacy.host);
+    try {
+      const accountKey = 'barkodd.account.v2.owner';
+      let saved;
+      try { saved = JSON.parse(localStorage.getItem(accountKey) || '{}'); } catch (_) { saved = {}; }
+      if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
+      if (!saved.rooms || typeof saved.rooms !== 'object' || Array.isArray(saved.rooms)) saved.rooms = {};
+      const existing = saved.rooms[legacy.host.id];
+      if (!existing?.viewerToken) saved.rooms[legacy.host.id] = { ...clean(legacy.host), account: true };
+      else if (existing.viewerToken !== legacy.host.viewerToken) copied = false;
+      localStorage.setItem(accountKey, JSON.stringify(saved));
+    } catch (_) { copied = false; }
+  }
+  if (safe(legacy.viewer)) {
+    recovery.viewer = clean(legacy.viewer);
+    try {
+      const existing = localStorage.getItem(GUEST_STORAGE_KEY);
+      if (!existing) localStorage.setItem(GUEST_STORAGE_KEY, JSON.stringify({ role: 'viewer', viewer: clean(legacy.viewer) }));
+      else if (JSON.parse(existing).viewer?.viewerToken !== legacy.viewer.viewerToken) copied = false;
+      if (legacy.role === 'viewer') localStorage.setItem('barkodd.guest-active.v2', 'true');
+    } catch (_) { copied = false; }
+  }
+  try {
+    if (copied) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify(recovery));
+  } catch (_) { /* Keep the sole recoverable viewer key if storage is unavailable. */ }
+}
+
 async function initialize() {
+  const actor = authActor();
+  migrateLegacyBindings();
+  try {
+    const state = await request('api/auth');
+    if (!sameActor(actor)) return;
+    beginIdentityChange(); auth = state; bindings = readBindings(); renderAccount();
+  }
+  catch (error) { await showWelcome(error.message); return; }
+  if (!authTimer) authTimer = setInterval(() => void refreshAuth(), 10000);
   if (location.hash.includes('room=') || location.hash.includes('key=')) {
     try {
       const binding = parsePairingLink(location.href);
       history.replaceState(null, '', location.pathname);
       await openRoom('viewer', binding);
     } catch (error) { await showWelcome(error.message); }
-  } else if (bindings.role && bindings[bindings.role]) {
+  } else if (readSavedGuest()) {
+    await openRoom('viewer', readSavedGuest());
+  } else if (bindings.role && bindings[bindings.role]?.account) {
     await openRoom(bindings.role, bindings[bindings.role]);
   } else {
     await showWelcome();

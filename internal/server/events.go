@@ -87,7 +87,7 @@ func (s *Server) eventRoomLocked(w http.ResponseWriter, r *http.Request, roomID 
 		fail(w, 404, "Комната не найдена")
 		return nil
 	}
-	role := authorize(r, current)
+	role := s.authorizeLocked(r, current)
 	if role == "" {
 		fail(w, 401, "Неверный или отозванный ключ комнаты")
 		return nil
@@ -220,7 +220,7 @@ func (s *Server) commitEvent(w http.ResponseWriter, r *http.Request, reservation
 	if current == nil {
 		return
 	}
-	if current != reservation.current || !validEventSession(current, body.SessionID) {
+	if current != reservation.current || !validEventSession(current, body.SessionID) || (s.config.AuthMode != "none" && current.SourceAuthSession != s.sessionKey(r)) {
 		fail(w, 403, "Сессия камеры завершена или заменена")
 		return
 	}

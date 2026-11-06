@@ -104,7 +104,7 @@ func TestRoomDeletionRequiresHostAndRemovesData(t *testing.T) {
 	}
 	f.s.Close()
 	var err error
-	f.s, err = New(Config{DataDir: f.dir})
+	f.s, err = New(Config{DataDir: f.dir, RoomCreationKey: testOwnerKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestInterruptedRoomDeletionFinishesOnRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	var err error
-	f.s, err = New(Config{DataDir: f.dir})
+	f.s, err = New(Config{DataDir: f.dir, RoomCreationKey: testOwnerKey})
 	if err != nil {
 		t.Fatal(err)
 	}

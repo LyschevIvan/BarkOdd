@@ -36,6 +36,8 @@ var identifier = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
 var storageID = regexp.MustCompile(`^[A-Za-z0-9_-]{16}$`)
 
 type Config struct {
+	AuthMode        string
+	AdminCode       string
 	RoomCreationKey string
 	DataDir         string
 	PublicURL       string
@@ -71,31 +73,34 @@ type storedEvent struct {
 }
 
 type room struct {
-	OwnerApproved   bool          `json:"ownerApproved"`
-	ID              string        `json:"id"`
-	Name            string        `json:"name"`
-	CreatedAt       time.Time     `json:"createdAt"`
-	HostHash        string        `json:"hostHash"`
-	ViewerHash      string        `json:"viewerHash"`
-	PairingVersion  uint64        `json:"pairingVersion"`
-	Settings        Settings      `json:"settings"`
-	LastNoiseAt     *time.Time    `json:"lastNoiseAt"`
-	LastPhotoAt     *time.Time    `json:"lastPhotoAt"`
-	Events          []storedEvent `json:"events"`
-	LastSeenAt      *time.Time    `json:"-"`
-	Monitoring      bool          `json:"-"`
-	SessionID       string        `json:"-"`
-	RetiredSessions []string      `json:"-"`
-	source          *streamClient
-	viewers         map[*streamClient]struct{}
-	streamEpoch     uint64
-	rtcEpoch        uint64
-	eventBusy       bool
-	eventCredit     float64
-	eventCreditAt   time.Time
+	OwnerID           string        `json:"ownerId"`
+	SourceAuthSession string        `json:"-"`
+	OwnerApproved     bool          `json:"ownerApproved"`
+	ID                string        `json:"id"`
+	Name              string        `json:"name"`
+	CreatedAt         time.Time     `json:"createdAt"`
+	HostHash          string        `json:"hostHash"`
+	ViewerHash        string        `json:"viewerHash"`
+	PairingVersion    uint64        `json:"pairingVersion"`
+	Settings          Settings      `json:"settings"`
+	LastNoiseAt       *time.Time    `json:"lastNoiseAt"`
+	LastPhotoAt       *time.Time    `json:"lastPhotoAt"`
+	Events            []storedEvent `json:"events"`
+	LastSeenAt        *time.Time    `json:"-"`
+	Monitoring        bool          `json:"-"`
+	SessionID         string        `json:"-"`
+	RetiredSessions   []string      `json:"-"`
+	source            *streamClient
+	viewers           map[*streamClient]struct{}
+	streamEpoch       uint64
+	rtcEpoch          uint64
+	eventBusy         bool
+	eventCredit       float64
+	eventCreditAt     time.Time
 }
 
 type Server struct {
+	auth              authState
 	mu                sync.Mutex
 	config            Config
 	rooms             map[string]*room
@@ -109,8 +114,8 @@ type Server struct {
 }
 
 func New(config Config) (*Server, error) {
-	if config.RoomCreationKey != "" && !ownerKeyFormat.MatchString(config.RoomCreationKey) {
-		return nil, errors.New("ROOM_CREATION_KEY must contain 32–128 URL-safe characters")
+	if err := validateAuthConfig(&config); err != nil {
+		return nil, err
 	}
 	if err := validateMediaConfig(&config); err != nil {
 		return nil, err
@@ -132,6 +137,9 @@ func New(config Config) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{config: config, rooms: make(map[string]*room), streams: make(map[*streamClient]struct{}), stop: make(chan struct{}), stopped: make(chan struct{})}
+	if err := s.initAuth(); err != nil {
+		return nil, err
+	}
 	s.retryRoomDeletions()
 	files, err := filepath.Glob(filepath.Join(config.DataDir, "*.json"))
 	if err != nil {
@@ -170,6 +178,9 @@ func New(config Config) (*Server, error) {
 			r.PairingVersion = 1
 		}
 		s.rooms[r.ID] = &r
+	}
+	if err = s.validateRoomOwners(); err != nil {
+		return nil, err
 	}
 	if err = s.verifyPhotos(); err != nil {
 		return nil, err
@@ -216,15 +227,20 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/api/rooms" {
-		if r.Method != http.MethodPost {
+		if r.Method != http.MethodPost && r.Method != http.MethodGet {
 			fail(w, 405, "Метод не поддерживается")
 			return
 		}
-		if !s.creationAuthorized(r) {
-			fail(w, 403, "Создание комнаты требует ключ владельца сервера")
+		user := s.principalLocked(r)
+		if user == nil || len(r.Header.Values("Authorization")) != 0 {
+			fail(w, 401, "Войдите, чтобы открыть свои комнаты")
 			return
 		}
-		s.createRoom(w, r)
+		if r.Method == http.MethodGet {
+			s.listRooms(w, user.ID)
+			return
+		}
+		s.createRoom(w, r, user.ID)
 		return
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
@@ -237,7 +253,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "Комната не найдена")
 		return
 	}
-	role := authorize(r, room)
+	role := s.authorizeLocked(r, room)
 	if role == "" {
 		fail(w, 401, "Неверный или отозванный ключ комнаты")
 		return
@@ -271,7 +287,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
+func (s *Server) createRoom(w http.ResponseWriter, r *http.Request, ownerID string) {
 	var body struct {
 		Name string `json:"name"`
 	}
@@ -303,13 +319,13 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "Не удалось создать ключ")
 		return
 	}
-	room := &room{OwnerApproved: true, ID: id, Name: body.Name, CreatedAt: now, HostHash: tokenHash(host), ViewerHash: tokenHash(viewer), PairingVersion: 1, Settings: Settings{Threshold: 0.06, QuietMS: 5000, SnapshotIntervalMS: 30000}, Events: []storedEvent{}}
+	room := &room{OwnerID: ownerID, OwnerApproved: true, ID: id, Name: body.Name, CreatedAt: now, HostHash: tokenHash(host), ViewerHash: tokenHash(viewer), PairingVersion: 1, Settings: Settings{Threshold: 0.06, QuietMS: 5000, SnapshotIntervalMS: 30000}, Events: []storedEvent{}}
 	if err = s.save(room); err != nil {
 		fail(w, 500, "Не удалось сохранить комнату")
 		return
 	}
 	s.rooms[id] = room
-	writeJSON(w, 201, map[string]string{"id": id, "hostToken": host, "viewerToken": viewer})
+	writeJSON(w, 201, map[string]string{"id": id, "ownerId": ownerID, "hostToken": host, "viewerToken": viewer})
 }
 
 func (s *Server) roomState(w http.ResponseWriter, r *room) {
@@ -397,6 +413,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request, current *room
 	current.LastSeenAt = &now
 	current.Monitoring = *body.Monitoring
 	current.SessionID = body.SessionID
+	current.SourceAuthSession = s.sessionKey(r)
 	s.refreshSourceLocked(current)
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
@@ -427,21 +444,29 @@ func (s *Server) pairing(w http.ResponseWriter, current *room) {
 	}
 	*current = updated
 	for c := range current.viewers {
-		s.closeStreamLocked(c, streamClose{code: 1008, status: 401, message: "Ключ просмотра отозван"})
+		if c.ownerID == "" {
+			s.closeStreamLocked(c, streamClose{code: 1008, status: 401, message: "Ключ просмотра отозван"})
+		}
 	}
 	s.notifyRoomLocked(current)
 	writeJSON(w, 200, map[string]string{"viewerToken": token})
 }
 
-func authorize(r *http.Request, room *room) string {
+func (s *Server) authorizeLocked(r *http.Request, room *room) string {
+	if !s.ownerEnabledLocked(room.OwnerID) {
+		return ""
+	}
 	raw := r.Header.Get("Authorization")
+	if len(r.Header.Values("Authorization")) == 0 {
+		if user := s.principalLocked(r); user != nil && user.ID == room.OwnerID {
+			return "host"
+		}
+		return ""
+	}
 	if !strings.HasPrefix(raw, "Bearer ") || len(raw) > 128 {
 		return ""
 	}
 	hash := tokenHash(strings.TrimPrefix(raw, "Bearer "))
-	if subtle.ConstantTimeCompare([]byte(hash), []byte(room.HostHash)) == 1 {
-		return "host"
-	}
 	if subtle.ConstantTimeCompare([]byte(hash), []byte(room.ViewerHash)) == 1 {
 		return "viewer"
 	}

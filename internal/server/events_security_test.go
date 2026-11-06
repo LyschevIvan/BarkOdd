@@ -22,14 +22,14 @@ func eventBody(episode, picture string) map[string]any {
 	return map[string]any{"sessionId": "event-camera", "episodeId": episode, "level": 0.4, "photo": picture}
 }
 
-func eventHTTPRequest(t *testing.T, path, token string, body any) *http.Request {
+func (f *fixture) eventHTTPRequest(t *testing.T, path, token string, body any) *http.Request {
 	t.Helper()
 	data, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r := httptest.NewRequest("POST", path, bytes.NewReader(data))
-	r.Header.Set("Authorization", "Bearer "+token)
+	f.authenticateRequest(r, token)
 	r.Header.Set("Content-Type", "application/json")
 	return r
 }
@@ -94,17 +94,19 @@ func TestEventPreparationDoesNotHoldRoomMutex(t *testing.T) {
 	f := setup(t)
 	startEventSession(f)
 	preparing, release := make(chan struct{}), make(chan struct{})
-	var first atomic.Bool
+	var calls atomic.Int32
 	now := f.now
 	f.s.config.Now = func() time.Time {
-		if first.CompareAndSwap(false, true) {
+		// The first clock read checks cookie expiry under lock; the second
+		// belongs to event parsing, which must stay outside the room mutex.
+		if calls.Add(1) == 2 {
 			close(preparing)
 			<-release
 		}
 		return now
 	}
 	done := make(chan int, 1)
-	request := eventHTTPRequest(t, f.path("/events"), f.host, eventBody("noise", photo(40)))
+	request := f.eventHTTPRequest(t, f.path("/events"), f.host, eventBody("noise", photo(40)))
 	go func() {
 		response := httptest.NewRecorder()
 		f.s.Handler().ServeHTTP(response, request)
@@ -117,7 +119,7 @@ func TestEventPreparationDoesNotHoldRoomMutex(t *testing.T) {
 		}
 	}()
 	<-preparing
-	heartbeat := eventHTTPRequest(t, f.path("/heartbeat"), f.host, map[string]any{"sessionId": "event-camera", "monitoring": true})
+	heartbeat := f.eventHTTPRequest(t, f.path("/heartbeat"), f.host, map[string]any{"sessionId": "event-camera", "monitoring": true})
 	fastDone := make(chan int, 1)
 	go func() {
 		response := httptest.NewRecorder()
@@ -136,7 +138,7 @@ func TestEventPreparationDoesNotHoldRoomMutex(t *testing.T) {
 
 func reserveEventForTest(t *testing.T, f *fixture, path, token string) (*http.Request, *eventPayload, *eventReservation) {
 	t.Helper()
-	r := eventHTTPRequest(t, path+"/events", token, eventBody("reserved", photo(60)))
+	r := f.eventHTTPRequest(t, path+"/events", token, eventBody("reserved", photo(60)))
 	w := httptest.NewRecorder()
 	body := f.s.parseEvent(w, r)
 	if body == nil {
@@ -209,7 +211,7 @@ func TestEventDecodeReservationDoesNotBlockOtherRooms(t *testing.T) {
 		{f.path("/heartbeat"), f.host, map[string]any{"sessionId": "event-camera", "monitoring": true}, 200},
 		{otherPath + "/events", other.HostToken, eventBody("other-room", photo(30)), 200},
 	} {
-		r := eventHTTPRequest(t, tc.path, tc.token, tc.body)
+		r := f.eventHTTPRequest(t, tc.path, tc.token, tc.body)
 		completed := make(chan int, 1)
 		go func() {
 			w := httptest.NewRecorder()
@@ -290,7 +292,7 @@ func TestEventCommitRechecksRoomAuthorizationAndSession(t *testing.T) {
 		}, 403},
 		{"host-revoked", func(f *fixture) {
 			f.s.mu.Lock()
-			f.s.rooms[f.room].HostHash = tokenHash("replacement-host-token")
+			f.s.revokeSessionLocked(tokenHash(f.cookie.Value))
 			f.s.mu.Unlock()
 		}, 401},
 		{"server-closed", func(f *fixture) { f.s.Close() }, 503},

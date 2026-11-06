@@ -31,16 +31,22 @@ test('microphone levels and disabled-input recovery work with a real Web Audio g
     };
   });
   await page.goto('./');
+  const mode = process.env.BARKODD_AUTH_MODE || 'admin_code';
+  if (mode !== 'none') {
+    if (mode === 'multi_user') await page.locator('#admin-login-toggle').click();
+    await page.locator('#login-code').fill(process.env.BARKODD_OWNER_KEY || 'test-owner-key-0123456789abcdef0123456789');
+    await page.locator('#code-form button[type=submit]').click();
+  }
+  await expect(page.locator('#account-panel')).toBeVisible();
   await page.locator('#choose-host').click();
   await page.locator('#room-name').fill('Synthetic microphone regression');
-  await page.locator('#creation-key').fill(process.env.BARKODD_OWNER_KEY || 'test-owner-key-0123456789abcdef0123456789');
   await page.locator('#host-form button[type=submit]').click();
   await expect(page.locator('#dashboard')).toBeVisible();
   await page.locator('#capture-button').click();
   await expect.poll(async () => parseFloat(await page.locator('#sound-level-value').textContent())).toBeGreaterThan(1);
-  const binding = await page.evaluate(() => JSON.parse(localStorage.getItem('barkodd.binding.v1')).host);
+  const binding = await page.evaluate(() => JSON.parse(localStorage.getItem('barkodd.account.v2.' + document.querySelector('#account-tools').dataset.userId)).host);
   const state = async () => {
-    const response = await page.request.get(new URL(`api/rooms/${binding.id}`, baseURL).href, { headers: { Authorization: `Bearer ${binding.hostToken}` } });
+    const response = await page.request.get(new URL(`api/rooms/${binding.id}`, baseURL).href);
     expect(response.ok()).toBe(true);
     return response.json();
   };

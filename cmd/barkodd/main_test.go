@@ -80,3 +80,17 @@ func TestOptionsDefaultLocalAndPublicPath(t *testing.T) {
 		t.Fatalf("public path or data directory lost: %+v", o.server)
 	}
 }
+
+func TestOptionsPassesAuthModesAndAdminCode(t *testing.T) {
+	for _, mode := range []string{"none", "admin_code", "multi_user"} {
+		values := map[string]string{"AUTH_MODE": " " + mode + " ", "ADMIN_CODE": "owner-code-0123456789abcdef0123456789"}
+		o, err := readOptions(func(k string) string { return values[k] })
+		if err != nil || o.server.AuthMode != mode || o.server.AdminCode != values["ADMIN_CODE"] {
+			t.Fatalf("auth options: %#v %v", o.server, err)
+		}
+	}
+	o, err := readOptions(func(string) string { return "" })
+	if err != nil || o.server.AuthMode != "admin_code" {
+		t.Fatal("unsafe auth default", o, err)
+	}
+}

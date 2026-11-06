@@ -24,11 +24,70 @@ import (
 )
 
 type fixture struct {
+	cookieMu           sync.Mutex
+	cookie             *http.Cookie
+	cookieServer       *Server
 	t                  *testing.T
 	s                  *Server
 	now                time.Time
 	dir                string
 	room, host, viewer string
+}
+
+// Legacy fixture calls name the host capability to select an owner request.
+// Production authorization never accepts that capability; explicit auth tests
+// use raw requests to exercise rejection of leaked host tokens.
+func (f *fixture) ensureCookie() *http.Cookie {
+	f.cookieMu.Lock()
+	defer f.cookieMu.Unlock()
+	if f.cookieServer != f.s {
+		origin := "http://example.com"
+		if f.s.config.PublicURL != "" {
+			u, _ := url.Parse(f.s.config.PublicURL)
+			origin = u.Scheme + "://" + u.Host
+		}
+		r := httptest.NewRequest("POST", origin+"/api/auth/login", strings.NewReader(`{"code":"`+testOwnerKey+`"}`))
+		r.Header.Set("Origin", origin)
+		w := httptest.NewRecorder()
+		f.s.Handler().ServeHTTP(w, r)
+		if w.Code != 200 {
+			f.t.Fatalf("fixture login: %d %s", w.Code, w.Body.String())
+		}
+		for _, c := range w.Result().Cookies() {
+			if c.Name == "barkodd_session" {
+				f.cookie = c
+			}
+		}
+		if f.cookie == nil {
+			f.t.Fatal("missing fixture cookie")
+		}
+		f.cookieServer = f.s
+	}
+	return f.cookie
+}
+func (f *fixture) authenticateRequest(r *http.Request, token string) {
+	origin := "http://" + r.Host
+	if f.s.config.PublicURL != "" {
+		u, _ := url.Parse(f.s.config.PublicURL)
+		origin = u.Scheme + "://" + u.Host
+	}
+	r.Header.Set("Origin", origin)
+	owner := token == testOwnerKey || (f.host != "" && token == f.host)
+	if !owner && token != "" {
+		f.s.mu.Lock()
+		for _, room := range f.s.rooms {
+			if room.HostHash == tokenHash(token) {
+				owner = true
+				break
+			}
+		}
+		f.s.mu.Unlock()
+	}
+	if owner {
+		r.AddCookie(f.ensureCookie())
+	} else if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
 }
 
 func setup(t *testing.T) *fixture {
@@ -62,9 +121,7 @@ func (f *fixture) call(method, path, token string, body any, status int) *httpte
 	}
 	r := httptest.NewRequest(method, path, bytes.NewReader(data))
 	r.RemoteAddr = "192.0.2.1:1234"
-	if token != "" {
-		r.Header.Set("Authorization", "Bearer "+token)
-	}
+	f.authenticateRequest(r, token)
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	f.s.Handler().ServeHTTP(w, r)
@@ -218,7 +275,7 @@ func TestValidationRejectsBadBodiesAndImages(t *testing.T) {
 	f.call("POST", f.path("/events"), f.host, map[string]any{"sessionId": "test-camera", "episodeId": "fine", "level": 0.2, "photo": "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(make([]byte, 401*1024))}, 413)
 	f.call("POST", f.path("/heartbeat"), f.host, map[string]any{"monitoring": true}, 400)
 	r := httptest.NewRequest("POST", "/api/rooms", strings.NewReader(`{"name":"ok"} {"name":"second"}`))
-	r.Header.Set("Authorization", "Bearer "+testOwnerKey)
+	f.authenticateRequest(r, testOwnerKey)
 	w := httptest.NewRecorder()
 	f.s.Handler().ServeHTTP(w, r)
 	if w.Code != 400 {
@@ -273,7 +330,7 @@ func TestCorruptStorageFailsClosed(t *testing.T) {
 	if err = os.WriteFile(files[0], []byte(`{broken`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = New(Config{DataDir: f.dir}); err == nil {
+	if _, err = New(Config{DataDir: f.dir, RoomCreationKey: testOwnerKey}); err == nil {
 		t.Fatal("corrupt data silently discarded")
 	}
 }
@@ -283,7 +340,7 @@ func TestRoomCapacityLimitAndConcurrentAccess(t *testing.T) {
 	limited := false
 	for i := 0; i < maxRooms; i++ {
 		r := httptest.NewRequest("POST", "/api/rooms", strings.NewReader(`{"name":"test"}`))
-		r.Header.Set("Authorization", "Bearer "+testOwnerKey)
+		f.authenticateRequest(r, testOwnerKey)
 		r.RemoteAddr = "192.0.2.1:9999"
 		w := httptest.NewRecorder()
 		f.s.Handler().ServeHTTP(w, r)
@@ -503,9 +560,10 @@ func TestSlowRequestBodyDoesNotBlockAuthenticatedState(t *testing.T) {
 				method = "PUT"
 			}
 			request := httptest.NewRequest(method, path, reader)
+			request.Header.Set("Origin", "http://example.com")
 			request.Header.Set("Content-Type", "application/json")
 			if route != "create" {
-				request.Header.Set("Authorization", "Bearer "+f.host)
+				f.authenticateRequest(request, f.host)
 			}
 			slowDone := make(chan struct{})
 			go func() { defer close(slowDone); f.s.Handler().ServeHTTP(httptest.NewRecorder(), request) }()
@@ -557,7 +615,7 @@ func TestSlowResponseDoesNotBlockHeartbeat(t *testing.T) {
 	fastDone := make(chan int, 1)
 	go func() {
 		request := httptest.NewRequest("POST", f.path("/heartbeat"), strings.NewReader(`{"monitoring":true,"sessionId":"active"}`))
-		request.Header.Set("Authorization", "Bearer "+f.host)
+		f.authenticateRequest(request, f.host)
 		request.Header.Set("Content-Type", "application/json")
 		out := httptest.NewRecorder()
 		f.s.Handler().ServeHTTP(out, request)
@@ -609,7 +667,7 @@ func TestPublicURLRejectsUnsafeSubpaths(t *testing.T) {
 		"https://example.com/barkodd/?", "https://example.com/barkodd/#", "https://example.com/barkodd/with space", "https://example.com/barkodd/\\other",
 	} {
 		t.Run(publicURL, func(t *testing.T) {
-			s, err := New(Config{DataDir: t.TempDir(), PublicURL: publicURL})
+			s, err := New(Config{DataDir: t.TempDir(), RoomCreationKey: testOwnerKey, PublicURL: publicURL})
 			if err == nil {
 				s.Close()
 				t.Fatal("accepted unsafe PUBLIC_URL")

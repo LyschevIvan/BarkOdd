@@ -34,6 +34,7 @@ func TestMediaTransportConfig(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.config.DataDir = t.TempDir()
+			tc.config.RoomCreationKey = testOwnerKey
 			s, err := New(tc.config)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error %v, wantErr %v", err, tc.wantErr)
@@ -66,7 +67,7 @@ func rtcAuth(t *testing.T, f *streamFixture, role, session string) (*websocket.C
 	c := f.dial()
 	token := f.viewer
 	if role == "host" {
-		token = f.host
+		token = ""
 	}
 	wsSend(t, c, map[string]any{"type": "auth", "role": role, "sessionId": session, "token": token})
 	return c, wsJSON(t, c, "ready")
@@ -216,7 +217,7 @@ func TestRTCSignalSizeLimit(t *testing.T) {
 }
 
 func TestRTCExplicitlyDisabledSTUN(t *testing.T) {
-	s, err := New(Config{DataDir: t.TempDir(), MediaTransport: "webrtc", STUNURLs: []string{}})
+	s, err := New(Config{DataDir: t.TempDir(), RoomCreationKey: testOwnerKey, MediaTransport: "webrtc", STUNURLs: []string{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +421,7 @@ func TestRTCReplacedHostHasNewSocketIdentity(t *testing.T) {
 func TestMediaICEURLValidation(t *testing.T) {
 	for _, raw := range []string{"stun:", "stun://host:3478", "stun:host:0", "stun:host:65536", "stun:user@host", "stun:host/path", "stun:host?transport=udp", "stun:host#fragment", "stun:host:garbage", "stun:host:", "stun:bad..host", "stun:-bad.host", "stun:bad-.host"} {
 		t.Run(raw, func(t *testing.T) {
-			s, err := New(Config{DataDir: t.TempDir(), MediaTransport: "webrtc", STUNURLs: []string{raw}})
+			s, err := New(Config{DataDir: t.TempDir(), RoomCreationKey: testOwnerKey, MediaTransport: "webrtc", STUNURLs: []string{raw}})
 			if s != nil {
 				s.Close()
 			}
@@ -431,7 +432,7 @@ func TestMediaICEURLValidation(t *testing.T) {
 	}
 	for _, raw := range []string{"stun:localhost", "stun:stun.example:3478", "stuns:[2001:db8::1]:5349", "stun:127.0.0.1:3478"} {
 		t.Run(raw, func(t *testing.T) {
-			s, err := New(Config{DataDir: t.TempDir(), MediaTransport: "webrtc", STUNURLs: []string{raw}})
+			s, err := New(Config{DataDir: t.TempDir(), RoomCreationKey: testOwnerKey, MediaTransport: "webrtc", STUNURLs: []string{raw}})
 			if err != nil {
 				t.Fatal(err)
 			}

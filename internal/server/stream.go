@@ -49,6 +49,7 @@ type streamClient struct {
 	conn                          *websocket.Conn
 	transport                     net.Conn
 	roomID, role, hash, sessionID string
+	authSession, ownerID          string
 	clientID                      string
 	signals                       chan queuedSignal
 	signalBytes                   int
@@ -74,6 +75,10 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, roomID stri
 		fail(w, 404, "Комната не найдена")
 		return
 	}
+	if len(r.Header.Values("Authorization")) != 0 {
+		fail(w, 400, "Передавайте ключ просмотра в сообщении WebSocket")
+		return
+	}
 	// Keys belong in the first encrypted message, never in proxy/access-log URLs.
 	if r.URL.RawQuery != "" || r.URL.ForceQuery {
 		fail(w, 400, "Параметры WebSocket URL не поддерживаются")
@@ -83,7 +88,7 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, roomID stri
 		fail(w, 403, "Недопустимый источник запроса")
 		return
 	}
-	c := &streamClient{roomID: roomID, frames: make(chan liveFrame, 1), changed: make(chan struct{}, 1), ready: make(chan struct{}, 1), stop: make(chan streamClose, 1), frameCredit: 2, signals: make(chan queuedSignal, maxSignalQueue), signalCredit: signalBurst}
+	c := &streamClient{authSession: s.sessionKey(r), roomID: roomID, frames: make(chan liveFrame, 1), changed: make(chan struct{}, 1), ready: make(chan struct{}, 1), stop: make(chan streamClose, 1), frameCredit: 2, signals: make(chan queuedSignal, maxSignalQueue), signalCredit: signalBurst}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -222,7 +227,7 @@ func (s *Server) authenticateStream(c *streamClient, kind websocket.MessageType,
 	var auth streamAuth
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	valid := kind == websocket.MessageText && decoder.Decode(&auth) == nil && decoder.Decode(new(any)) == io.EOF && auth.Type == "auth" && (auth.Role == "host" || auth.Role == "viewer") && len(auth.Token) > 0 && len(auth.Token) <= 128
+	valid := kind == websocket.MessageText && decoder.Decode(&auth) == nil && decoder.Decode(new(any)) == io.EOF && auth.Type == "auth" && (auth.Role == "host" || auth.Role == "viewer") && len(auth.Token) <= 128
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	reject := func(status int, message string) error {
@@ -239,19 +244,31 @@ func (s *Server) authenticateStream(c *streamClient, kind websocket.MessageType,
 	if current == nil {
 		return reject(401, "Комната недоступна")
 	}
-	hash := tokenHash(auth.Token)
-	role := ""
-	if subtle.ConstantTimeCompare([]byte(hash), []byte(current.HostHash)) == 1 {
-		role = "host"
+	if !s.ownerEnabledLocked(current.OwnerID) {
+		return reject(401, "Комната недоступна")
 	}
-	if subtle.ConstantTimeCompare([]byte(hash), []byte(current.ViewerHash)) == 1 {
-		role = "viewer"
-	}
-	if role == "" {
-		return reject(401, "Неверный или отозванный ключ комнаты")
-	}
-	if role != auth.Role {
-		return reject(403, "Ключ не соответствует роли клиента")
+	hash := ""
+	role := auth.Role
+	if auth.Token != "" {
+		hash = tokenHash(auth.Token)
+		if subtle.ConstantTimeCompare([]byte(hash), []byte(current.ViewerHash)) != 1 {
+			return reject(401, "Неверный или отозванный ключ комнаты")
+		}
+		if role != "viewer" {
+			return reject(403, "Ключ не соответствует роли клиента")
+		}
+		c.authSession = "" // A guest capability is independent of any accompanying cookie.
+	} else {
+		ownerID := ""
+		if s.config.AuthMode == "none" {
+			ownerID = "owner"
+		} else if user := s.sessionUserLocked(c.authSession); user != nil {
+			ownerID = user.ID
+		}
+		if ownerID == "" || ownerID != current.OwnerID {
+			return reject(401, "Войдите как владелец комнаты")
+		}
+		c.ownerID = ownerID
 	}
 	clientID, err := randomID(16)
 	if err != nil {
@@ -262,7 +279,7 @@ func (s *Server) authenticateStream(c *streamClient, kind websocket.MessageType,
 		if !identifier.MatchString(auth.SessionID) {
 			return reject(400, "Укажите идентификатор сессии камеры")
 		}
-		if current.SessionID != auth.SessionID || slices.Contains(current.RetiredSessions, auth.SessionID) {
+		if current.SessionID != auth.SessionID || slices.Contains(current.RetiredSessions, auth.SessionID) || (s.config.AuthMode != "none" && current.SourceAuthSession != c.authSession) {
 			return reject(403, "Сессия камеры завершена или заменена")
 		}
 		if !s.roomFreshLocked(current) {
@@ -303,13 +320,26 @@ func (s *Server) validStreamLocked(c *streamClient) bool {
 		return false
 	}
 	r := s.rooms[c.roomID]
-	if r == nil {
+	if r == nil || !s.ownerEnabledLocked(r.OwnerID) {
+		return false
+	}
+	if c.ownerID != "" {
+		if c.ownerID != r.OwnerID {
+			return false
+		}
+		if s.config.AuthMode != "none" {
+			user := s.sessionUserLocked(c.authSession)
+			if user == nil || user.ID != c.ownerID {
+				return false
+			}
+		}
+	} else if c.role != "viewer" || c.hash != r.ViewerHash || c.pairingVersion != r.PairingVersion {
 		return false
 	}
 	if c.role == "viewer" {
-		return c.hash == r.ViewerHash && c.pairingVersion == r.PairingVersion
+		return true
 	}
-	return c == r.source && c.hash == r.HostHash && c.sessionID == r.SessionID && !slices.Contains(r.RetiredSessions, c.sessionID)
+	return c == r.source && c.sessionID == r.SessionID && !slices.Contains(r.RetiredSessions, c.sessionID) && (s.config.AuthMode == "none" || c.authSession == r.SourceAuthSession)
 }
 func (s *Server) sourceActiveLocked(r *room) bool {
 	return r.source != nil && s.validStreamLocked(r.source) && s.roomFreshLocked(r) && r.Monitoring

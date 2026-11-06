@@ -6,6 +6,8 @@ services:
     environment:
       ADDR: 0.0.0.0:8080
       DATA_DIR: /data
+      AUTH_MODE: ${AUTH_MODE:-admin_code}
+      ADMIN_CODE: ${ADMIN_CODE:-}
       ROOM_CREATION_KEY: ${ROOM_CREATION_KEY:-}
       PUBLIC_URL: https://${APP_HOST:?Set APP_HOST in .env}
       MEDIA_TRANSPORT: ${MEDIA_TRANSPORT:-websocket}

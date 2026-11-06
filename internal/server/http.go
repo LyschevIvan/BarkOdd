@@ -14,6 +14,10 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	if (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete) && !s.streamOriginAllowed(r) {
+		fail(w, 403, "Недопустимый источник запроса")
+		return
+	}
 	if len(parts) == 4 && parts[0] == "api" && parts[1] == "rooms" && parts[3] == "stream" {
 		s.serveStream(w, r, parts[2])
 		return
@@ -45,7 +49,9 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = io.NopCloser(bytes.NewReader(data))
 	}
 	response := &bufferedResponse{header: make(http.Header)}
-	if r.Method == http.MethodPost && len(parts) == 4 && parts[0] == "api" && parts[1] == "rooms" && parts[3] == "events" {
+	if r.URL.Path == "/api/auth" || strings.HasPrefix(r.URL.Path, "/api/auth/") || strings.HasPrefix(r.URL.Path, "/api/admin/") {
+		s.serveAuth(response, r)
+	} else if r.Method == http.MethodPost && len(parts) == 4 && parts[0] == "api" && parts[1] == "rooms" && parts[3] == "events" {
 		s.serveEvent(response, r, parts[2])
 	} else {
 		s.handleAPI(response, r)

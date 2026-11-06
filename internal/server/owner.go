@@ -1,26 +1,15 @@
 package server
 
 import (
-	"crypto/subtle"
 	"net/http"
 	"regexp"
-	"strings"
+	"sort"
+	"time"
 )
 
 var ownerKeyFormat = regexp.MustCompile(`^[A-Za-z0-9_-]{32,128}$`)
 
-func (s *Server) ownerAuthorized(key string) bool {
-	if s.config.RoomCreationKey == "" || !ownerKeyFormat.MatchString(key) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(tokenHash(key)), []byte(tokenHash(s.config.RoomCreationKey))) == 1
-}
-
 func (s *Server) approveRoom(w http.ResponseWriter, r *http.Request, current *room) {
-	if !s.ownerAuthorized(r.Header.Get("X-BarkOdd-Owner-Key")) {
-		fail(w, http.StatusForbidden, "Укажите верный ключ владельца сервера")
-		return
-	}
 	updated := *current
 	updated.OwnerApproved = true
 	if err := s.save(&updated); err != nil {
@@ -37,7 +26,48 @@ func (s *Server) approveRoom(w http.ResponseWriter, r *http.Request, current *ro
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
-func (s *Server) creationAuthorized(r *http.Request) bool {
-	value, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	return ok && s.ownerAuthorized(value)
+func (s *Server) listRooms(w http.ResponseWriter, ownerID string) {
+	type summary struct {
+		ID         string    `json:"id"`
+		Name       string    `json:"name"`
+		CreatedAt  time.Time `json:"createdAt"`
+		Online     bool      `json:"online"`
+		Monitoring bool      `json:"monitoring"`
+	}
+	rooms := []summary{}
+	for _, room := range s.rooms {
+		if room.OwnerID == ownerID {
+			online := s.roomFreshLocked(room)
+			rooms = append(rooms, summary{room.ID, room.Name, room.CreatedAt, online, online && room.Monitoring})
+		}
+	}
+	sort.Slice(rooms, func(i, j int) bool { return rooms[i].CreatedAt.Before(rooms[j].CreatedAt) })
+	writeJSON(w, 200, map[string]any{"rooms": rooms})
+}
+
+// Called with s.mu held, after a session is removed or an owner is disabled.
+func (s *Server) invalidateAuthLocked(sessionKey, ownerID string) {
+	if sessionKey == "" && ownerID == "" {
+		return
+	}
+	for c := range s.streams {
+		room := s.rooms[c.roomID]
+		if (sessionKey != "" && c.authSession == sessionKey) || (ownerID != "" && room != nil && room.OwnerID == ownerID) {
+			s.closeStreamLocked(c, streamClose{code: 1008, status: 401, message: "Сессия завершена или доступ отозван"})
+		}
+	}
+	for _, room := range s.rooms {
+		matches := ownerID != "" && room.OwnerID == ownerID
+		if matches || (sessionKey != "" && room.SourceAuthSession == sessionKey) {
+			if room.SessionID != "" {
+				retireSession(room, room.SessionID)
+			}
+			room.Monitoring = false
+			room.LastSeenAt = nil
+			room.SourceAuthSession = ""
+			room.rtcEpoch++
+			s.refreshSourceLocked(room)
+		}
+	}
+
 }

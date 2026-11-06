@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,22 +17,12 @@ func TestRoomCreationRequiresIndependentOwnerCredential(t *testing.T) {
 	}
 	defer s.Close()
 	for _, token := range []string{"", "wrong", testOwnerKey} {
-		r := httptest.NewRequest("POST", "/api/rooms", strings.NewReader(`{"name":"home"}`))
-		if token != "" {
-			r.Header.Set("Authorization", "Bearer "+token)
-		}
-		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, r)
-		want := 403
-		if token == testOwnerKey {
-			want = 201
-		}
-		if w.Code != want {
-			t.Fatalf("creation got %d want %d", w.Code, want)
-		}
-		if strings.Contains(w.Body.String(), testOwnerKey) {
-			t.Fatal("owner key exposed")
-		}
+		accountRequest(t, s, "POST", "/api/rooms", map[string]string{"name": "home"}, nil, token, 401)
+	}
+	cookie := accountLogin(t, s)
+	w := accountRequest(t, s, "POST", "/api/rooms", map[string]string{"name": "home"}, cookie, "", 201)
+	if strings.Contains(w.Body.String(), testOwnerKey) {
+		t.Fatal("owner key exposed")
 	}
 }
 
@@ -52,19 +41,9 @@ func TestLegacyRoomRequiresOwnerApprovalBeforeTURN(t *testing.T) {
 		}
 	}
 	c.CloseNow()
-	for _, tc := range []struct {
-		token, owner string
-		want         int
-	}{{f.viewer, testOwnerKey, 403}, {f.host, "wrong", 403}, {f.host, testOwnerKey, 200}} {
-		r := httptest.NewRequest("POST", f.path("/approval"), nil)
-		r.Header.Set("Authorization", "Bearer "+tc.token)
-		r.Header.Set("X-BarkOdd-Owner-Key", tc.owner)
-		w := httptest.NewRecorder()
-		f.s.Handler().ServeHTTP(w, r)
-		if w.Code != tc.want {
-			t.Fatalf("approval got %d want %d", w.Code, tc.want)
-		}
-	}
+	f.call("POST", f.path("/approval"), f.viewer, nil, 403)
+	accountRequest(t, f.s, "POST", f.path("/approval"), nil, nil, f.host, 401)
+	f.call("POST", f.path("/approval"), f.host, nil, 200)
 	_, ready = rtcAuth(t, f, "viewer", "")
 	data, _ := json.Marshal(ready)
 	if !strings.Contains(string(data), "credential") {
@@ -73,16 +52,9 @@ func TestLegacyRoomRequiresOwnerApprovalBeforeTURN(t *testing.T) {
 }
 
 func TestRoomCreationClosedWithoutOwnerKey(t *testing.T) {
-	s, err := New(Config{DataDir: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	r := httptest.NewRequest("POST", "/api/rooms", strings.NewReader(`{"name":"stranger"}`))
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, r)
-	if w.Code != 403 {
-		t.Fatalf("public creation status = %d, want 403", w.Code)
+	if s, err := New(Config{DataDir: t.TempDir()}); err == nil {
+		s.Close()
+		t.Fatal("protected mode started without admin code")
 	}
 }
 
@@ -110,7 +82,7 @@ func TestOwnerApprovalAndRoomTokensSurviveRestart(t *testing.T) {
 		t.Fatal("owner credential on disk")
 	}
 	f.s.Close()
-	f.s, err = New(Config{DataDir: f.dir, MediaTransport: "webrtc", STUNURLs: []string{}, TURNURLs: []string{"turn:relay.example:3478"}, TURNSecret: "test-only"})
+	f.s, err = New(Config{DataDir: f.dir, RoomCreationKey: testOwnerKey, MediaTransport: "webrtc", STUNURLs: []string{}, TURNURLs: []string{"turn:relay.example:3478"}, TURNSecret: "test-only"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +92,7 @@ func TestOwnerApprovalAndRoomTokensSurviveRestart(t *testing.T) {
 	if !f.s.rooms[f.room].OwnerApproved {
 		t.Fatal("approval not persisted")
 	}
-	f.call("POST", "/api/rooms", testOwnerKey, map[string]any{"name": "closed"}, 403)
+	accountRequest(t, f.s, "POST", "/api/rooms", map[string]string{"name": "closed"}, nil, testOwnerKey, 401)
 }
 
 func TestInvalidOwnerKeyFailsConfiguration(t *testing.T) {
