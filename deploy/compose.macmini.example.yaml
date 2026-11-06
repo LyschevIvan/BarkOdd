@@ -1,0 +1,43 @@
+# Standalone deployment alongside the existing Caddy container on Mac mini.
+# Run from the project root: docker compose -f deploy/compose.macmini.example.yaml --env-file .env up -d --build
+name: barkodd
+services:
+  app:
+    build:
+      context: ..
+    restart: unless-stopped
+    environment:
+      ADDR: 0.0.0.0:8080
+      DATA_DIR: /data
+      ROOM_CREATION_KEY: ${ROOM_CREATION_KEY:-}
+      PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL in .env}
+      MEDIA_TRANSPORT: ${MEDIA_TRANSPORT:-websocket}
+      STUN_URLS: ${STUN_URLS:-}
+      TURN_URLS: ${TURN_URLS:-}
+      TURN_SECRET: ${TURN_SECRET:-}
+      TURN_USERNAME: ${TURN_USERNAME:-}
+      TURN_PASSWORD: ${TURN_PASSWORD:-}
+    ports:
+      - "127.0.0.1:8087:8080"
+    volumes:
+      - barkodd_data:/data
+    networks:
+      web:
+        aliases:
+          - barkodd-app
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  barkodd_data:
+networks:
+  web:
+    external: true

@@ -1,0 +1,37 @@
+# HTTPS application and WS control. WebRTC can use a separately configured TURN server.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      ADDR: 0.0.0.0:8080
+      DATA_DIR: /data
+      ROOM_CREATION_KEY: ${ROOM_CREATION_KEY:-}
+      PUBLIC_URL: https://${APP_HOST:?Set APP_HOST in .env}
+      MEDIA_TRANSPORT: ${MEDIA_TRANSPORT:-websocket}
+      STUN_URLS: ${STUN_URLS:-}
+      TURN_URLS: ${TURN_URLS:-}
+      TURN_SECRET: ${TURN_SECRET:-}
+      TURN_USERNAME: ${TURN_USERNAME:-}
+      TURN_PASSWORD: ${TURN_PASSWORD:-}
+    volumes:
+      - barkodd_data:/data
+  https:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      APP_HOST: ${APP_HOST}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+volumes:
+  barkodd_data:
+  caddy_data:
+  caddy_config:
