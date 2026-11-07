@@ -446,7 +446,11 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
         if (event.takePhoto) {
           try {
             const captured = snapshot(state);
-            if (captured) { photo = captured; photoAt = new Date().toISOString(); }
+            if (captured) {
+              photo = captured;
+              photoAt = new Date().toISOString();
+              state.detector.photoCaptured(now());
+            }
           } catch (error) { report(error); }
         }
         const payload = { sessionId: state.sessionId, episodeId: event.episodeId, level, detectedAt: new Date().toISOString() };
@@ -470,8 +474,14 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
       delete payload.photo;
       delete payload.photoAt;
     }
-    await request(state, 'post', '/events', payload);
+    const saved = await request(state, 'post', '/events', payload);
     if (!state.active) return;
+    if (payload.photo) {
+      // A successful noise update can still skip its photo during server cooldown.
+      // Keep that JPEG queued until the returned event confirms its timestamp.
+      if (!(Date.parse(saved?.photoAt) >= Date.parse(payload.photoAt))) return;
+      state.detector.photoCaptured(now());
+    }
     const current = state.events.get(payload.episodeId);
     if (current === payload) state.events.delete(payload.episodeId);
     else if (current?.photo === payload.photo && current?.photoAt === payload.photoAt) {

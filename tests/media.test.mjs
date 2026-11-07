@@ -17,6 +17,10 @@ function target(properties = {}) {
   });
 }
 
+function eventResult(body, photoAt = body.photoAt ?? null) {
+  return { id: body.episodeId, startedAt: body.detectedAt, lastNoiseAt: body.detectedAt, photoAt, hasPhoto: !!photoAt, level: body.level };
+}
+
 function environment({ muted = false, enabled = true, audioLevel = 0.25, videoReady = false, encodeDelay = 0, frameBytes = 12000, deferredMedia = false, deferredWake = false, rtc = false } = {}) {
   const originals = new Map();
   const replace = (name, value) => {
@@ -34,6 +38,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
   const sockets = [];
   const encodes = [];
   const canvases = [];
+  const videos = [];
   const peers = [];
   const localStreams = [];
   const transports = [];
@@ -47,7 +52,8 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
   let pendingWake;
   let releasedLocks = 0;
   let heartbeatResponse = () => Promise.resolve();
-  let eventResponse = () => Promise.resolve();
+  let eventResponse = body => Promise.resolve(eventResult(body));
+  let snapshotResponse = () => 'data:image/jpeg;base64,/9j/2Q==';
   let resumeResponse = null;
   const wakeLock = target({ release() { releasedLocks++; this.dispatchEvent({ type: 'release' }); return Promise.resolve(); } });
   class FrameBlob {
@@ -102,6 +108,12 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
   });
   replace('clearTimeout', id => timers.delete(id));
   replace('performance', { now: () => time });
+  const NativeDate = Date;
+  const startedAt = NativeDate.UTC(2026, 0, 1);
+  replace('Date', class extends NativeDate {
+    constructor(...args) { super(...(args.length ? args : [startedAt + time])); }
+    static now() { return startedAt + time; }
+  });
   replace('navigator', {
     mediaDevices: { getUserMedia: constraints => { mediaRequests++; mediaConstraints.push(constraints); return deferredMedia ? new Promise(resolve => { pendingMedia = resolve; }) : Promise.resolve(stream); } },
     wakeLock: { request: () => deferredWake ? new Promise(resolve => { pendingWake = resolve; }) : Promise.resolve(wakeLock) },
@@ -132,7 +144,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
         const canvas = {
           width: 0, height: 0,
           getContext: () => ({ drawImage() {} }),
-          toDataURL: () => 'data:image/jpeg;base64,/9j/2Q==',
+          toDataURL: () => snapshotResponse(),
           toBlob(callback, type, quality) {
             encodes.push({ canvas, width: canvas.width, height: canvas.height, quality, at: time });
             const size = typeof frameBytes === 'function' ? frameBytes({ quality, width: canvas.width, height: canvas.height }) : frameBytes;
@@ -144,11 +156,13 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
         return canvas;
       }
       assert.ok(name === 'video' || name === 'audio');
-      return {
+      const element = {
         readyState: videoReady ? 4 : 0, videoWidth: videoReady ? 1920 : 0, videoHeight: videoReady ? 1080 : 0,
         play: () => Promise.resolve(),
         pause() {},
       };
+      if (name === 'video') videos.push(element);
+      return element;
     },
   }));
   const monitor = createMonitor({
@@ -156,7 +170,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
       streamURL: 'wss://example.test/barkodd/api/rooms/room-id/stream', token: 'secret-key',
       get: async () => ({ signals: [], cursor: 0, pairingVersion: 1 }),
       post: async (path, body) => {
-        posts.push({ path, body });
+        posts.push({ path, body: { ...body }, at: time });
         if (path === '/heartbeat' && !body.stopped) return heartbeatResponse(body);
         if (path === '/events') return eventResponse(body);
       },
@@ -198,12 +212,17 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     },
     onHeartbeat(callback) { heartbeatResponse = callback; },
     onEvent(callback) { eventResponse = callback; },
+    onSnapshot(callback) { snapshotResponse = callback; },
     onResume(callback) { resumeResponse = callback; },
     resolveMedia() { pendingMedia(stream); },
     resolveWake() { pendingWake(wakeLock); },
     releasedLocks: () => releasedLocks,
     timerCount: () => timers.size,
     setEnabled(value) { microphone.enabled = value; },
+    setAudioLevel(value) { audioLevel = value; },
+    setVideoReady(value) {
+      for (const video of videos) Object.assign(video, { readyState: value ? 4 : 0, videoWidth: value ? 1920 : 0, videoHeight: value ? 1080 : 0 });
+    },
     setAudioState(value) { audioContext.state = value; },
     transitionAudio(value) { audioContext.state = value; audioContext.onstatechange?.(); },
     setMuted(value) {
@@ -335,6 +354,178 @@ await test('suspended audio rejects retained samples and recovers when resumed',
   });
 });
 
+
+await test('an unready camera retries on the next noise update and successful photos respect the configured interval', {}, async env => {
+  await env.monitor.startHost({ settings: { snapshotIntervalMs: 10000 } });
+  await env.settle();
+  env.openSocket('host');
+  const events = () => env.posts.filter(post => post.path === '/events');
+  const photos = () => events().filter(post => post.body.photo);
+  await env.advance(500);
+  assert.equal(events().length, 1, 'noise must still be reported while the camera starts');
+  assert.equal(photos().length, 0);
+  env.setVideoReady(true);
+  await env.advance(1000);
+  assert.equal(photos().length, 1, 'the next qualified update must upload a photo instead of waiting the full interval');
+  assert.equal(photos()[0].body.photo, 'data:image/jpeg;base64,/9j/2Q==');
+  assert.ok(photos()[0].body.photoAt);
+  await env.advance(9500);
+  assert.equal(photos().length, 1, 'successful capture must start the configured cooldown');
+  await env.advance(1500);
+  assert.equal(photos().length, 2, 'continued noise must upload the next photo after ten seconds');
+});
+
+await test('working camera groups separated bursts inside the interval and the next episode includes a photo', { videoReady: true }, async env => {
+  await env.monitor.startHost({ settings: { snapshotIntervalMs: 10000 } });
+  await env.settle();
+  env.openSocket('host');
+  const events = () => env.posts.filter(post => post.path === '/events');
+  await env.advance(500);
+  const first = events()[0].body;
+  assert.ok(first.photo);
+  env.setAudioLevel(0);
+  await env.advance(5000);
+  env.setAudioLevel(0.25);
+  await env.advance(500);
+  assert.equal(events().length, 2, 'each sustained burst must still report its noise');
+  assert.equal(events()[1].body.episodeId, first.episodeId, 'a pause must not create an empty history card during the interval');
+  env.setAudioLevel(0);
+  await env.advance(5000);
+  env.setAudioLevel(0.25);
+  await env.advance(500);
+  assert.equal(events().length, 3);
+  assert.notEqual(events()[2].body.episodeId, first.episodeId);
+  assert.ok(events()[2].body.photo, 'the first update of the next eligible episode must include its captured photo');
+});
+
+await test('a delayed photo confirmation during silence keeps the next burst in the photographed episode', { videoReady: true }, async env => {
+  let confirm;
+  env.onEvent(body => new Promise(resolve => { confirm = () => resolve(eventResult(body)); }));
+  await env.monitor.startHost({ settings: { snapshotIntervalMs: 10000 } });
+  await env.settle();
+  env.openSocket('host');
+  await env.advance(500);
+  env.setAudioLevel(0);
+  await env.advance(10000);
+  confirm();
+  env.onEvent(body => Promise.resolve(eventResult(body)));
+  await env.settle();
+  env.setAudioLevel(0.25);
+  await env.advance(500);
+  const events = env.posts.filter(post => post.path === '/events');
+  assert.equal(events.length, 2);
+  assert.ok(events[0].body.photo);
+  assert.equal(events[1].body.episodeId, events[0].body.episodeId, 'late photo confirmation must prevent an early empty episode');
+  assert.equal(events[1].body.photo, undefined);
+});
+
+await test('a snapshot encoding error retries on the next qualified noise update', { videoReady: true }, async env => {
+  env.onSnapshot(() => { throw new Error('Camera frame unavailable'); });
+  await env.monitor.startHost();
+  await env.settle();
+  env.openSocket('host');
+  await env.advance(500);
+  assert.equal(env.errors.length, 1);
+  assert.equal(env.errors.pop().message, 'Camera frame unavailable');
+  assert.ok(env.posts.some(post => post.path === '/events' && !post.body.photo));
+  env.onSnapshot(() => 'data:image/jpeg;base64,/9j/2Q==');
+  await env.advance(1000);
+  assert.ok(env.posts.some(post => post.path === '/events' && post.body.photo === 'data:image/jpeg;base64,/9j/2Q=='));
+});
+
+for (const previousPhotoAt of [null, '2025-12-31T23:59:50.000Z']) {
+  await test(`HTTP success with ${previousPhotoAt ? 'an older' : 'no'} photo timestamp keeps the photo queued until accepted`, { videoReady: true }, async env => {
+    let accepted = false;
+    env.onEvent(body => Promise.resolve(eventResult(body, accepted ? body.photoAt : previousPhotoAt)));
+    await env.monitor.startHost();
+    await env.settle();
+    env.openSocket('host');
+    await env.advance(500);
+    env.setAudioLevel(0);
+    const uploads = () => env.posts.filter(post => post.path === '/events');
+    const first = uploads()[0].body;
+    assert.ok(first.photo);
+    accepted = true;
+    await env.advance(500);
+    assert.equal(uploads().length, 2, 'a cooldown rejection must be retried by the serial upload loop');
+    assert.deepEqual(uploads()[1].body, first, 'retry must retain the captured JPEG and its timestamp');
+    await env.advance(500);
+    assert.equal(uploads().length, 2, 'acceptance must remove the queued photo');
+  });
+}
+
+await test('server photo acceptance extends cooldown past the upload response time', { videoReady: true }, async env => {
+  let accept;
+  env.onEvent(body => new Promise(resolve => { accept = () => resolve(eventResult(body)); }));
+  await env.monitor.startHost({ settings: { snapshotIntervalMs: 10000 } });
+  await env.settle();
+  env.openSocket('host');
+  await env.advance(2500);
+  const photos = () => env.posts.filter(post => post.path === '/events' && post.body.photo);
+  assert.equal(photos().length, 1);
+  accept();
+  env.onEvent(body => Promise.resolve(eventResult(body)));
+  await env.settle();
+  await env.advance(10000);
+  assert.equal(photos().length, 1, 'capture must respect the interval after acceptance despite upload latency');
+  await env.advance(1000);
+  assert.equal(photos().length, 2);
+});
+
+for (const accepted of [false, true]) {
+  await test(`a ${accepted ? 'confirmed' : 'rejected'} photo response preserves newer noise sampled during the request`, { videoReady: true }, async env => {
+    let finish;
+    env.onEvent(body => new Promise(resolve => { finish = () => resolve(eventResult(body, accepted ? body.photoAt : null)); }));
+    await env.monitor.startHost();
+    await env.settle();
+    env.openSocket('host');
+    await env.advance(500);
+    env.setAudioLevel(0.4);
+    await env.advance(1000);
+    finish();
+    env.onEvent(body => Promise.resolve(eventResult(body)));
+    await env.settle();
+    await env.advance(500);
+    const uploads = env.posts.filter(post => post.path === '/events');
+    assert.equal(uploads.length, 2);
+    assert.ok(uploads[1].body.level > 0.39);
+    assert.ok(Date.parse(uploads[1].body.detectedAt) > Date.parse(uploads[0].body.detectedAt));
+    assert.equal(!!uploads[1].body.photo, !accepted, 'only a confirmed photo may be removed from the newer noise update');
+  });
+}
+
+await test('confirming an older in-flight photo keeps a newer captured photo pending', { videoReady: true }, async env => {
+  let finish;
+  env.onEvent(body => new Promise(resolve => { finish = () => resolve(eventResult(body)); }));
+  await env.monitor.startHost({ settings: { snapshotIntervalMs: 10000 } });
+  await env.settle();
+  env.openSocket('host');
+  await env.advance(10500);
+  finish();
+  env.onEvent(body => Promise.resolve(eventResult(body)));
+  await env.settle();
+  await env.advance(500);
+  const uploads = env.posts.filter(post => post.path === '/events');
+  assert.equal(uploads.length, 2);
+  assert.ok(uploads[1].body.photo);
+  assert.ok(Date.parse(uploads[1].body.photoAt) > Date.parse(uploads[0].body.photoAt));
+});
+
+for (const input of ['silent', 'muted']) {
+  await test(`camera recovery does not take a photo while the microphone is ${input}`, {}, async env => {
+    await env.monitor.startHost({ settings: { snapshotIntervalMs: 10000 } });
+    await env.settle();
+    env.openSocket('host');
+    await env.advance(500);
+    env.setVideoReady(true);
+    if (input === 'silent') env.setAudioLevel(0); else env.setMuted(true);
+    await env.advance(11000);
+    assert.equal(env.posts.filter(post => post.path === '/events' && post.body.photo).length, 0);
+    if (input === 'silent') env.setAudioLevel(0.25); else env.setMuted(false);
+    await env.advance(1500);
+    assert.equal(env.posts.filter(post => post.path === '/events' && post.body.photo).length, 1);
+  });
+}
 
 await test('host authenticates with the current session and avoids live encoding without viewers', { videoReady: true }, async env => {
   await env.monitor.startHost();

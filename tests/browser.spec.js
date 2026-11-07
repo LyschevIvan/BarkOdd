@@ -62,6 +62,28 @@ const roomURL = (base, id, route = '') => new URL(`api/rooms/${id}${route}`, bas
 
 const frameProgress = page => rtc ? page.locator(liveSelector).evaluate(video => video.getVideoPlaybackQuality().totalVideoFrames) : page.locator(liveSelector).getAttribute('src');
 
+test('noise bursts within the photo interval update one photographed history event', async ({ page, baseURL }) => {
+  await loginOwner(page);
+  await page.locator('#choose-host').click();
+  await page.locator('#room-name').fill('Noise interval');
+  await page.locator('#host-form button[type=submit]').click();
+  await expect(page.locator('#dashboard')).toBeVisible();
+  const binding = await savedHost(page);
+  const state = async () => (await page.request.get(roomURL(baseURL, binding.id))).json();
+  await page.locator('#capture-button').click();
+  await expect.poll(async () => (await state()).events.filter(event => event.hasPhoto).length).toBe(1);
+  const first = (await state()).events[0];
+  // The synthetic microphone repeats after eight seconds, including a quiet gap
+  // long enough to split episodes before the interval fix.
+  await expect.poll(async () => Date.parse((await state()).lastNoiseAt) - Date.parse(first.lastNoiseAt)).toBeGreaterThan(5000);
+  const next = await state();
+  expect(next.events).toHaveLength(1);
+  expect(next.events[0].id).toBe(first.id);
+  expect(next.events[0].hasPhoto).toBe(true);
+  expect(next.events[0].photoAt).toBe(first.photoAt);
+  await page.locator('#capture-button').click();
+});
+
 test(`${transport}: on-demand video, photos, pause, reconnect and revocation`, async ({ browser, page, baseURL }) => {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
