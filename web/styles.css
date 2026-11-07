@@ -14,3 +14,48 @@
 .history-actions{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0}.history-actions .text-button{min-height:36px}.history-policy{font-size:11px;color:var(--muted);margin-top:8px;line-height:1.7}.dashboard-layout>.latest-photo-panel{width:100%}
 .control-buttons{flex-wrap:wrap}.control-buttons .button[aria-pressed="true"]{box-shadow:inset 0 0 0 2px #a3b58b}.audio-retry{text-align:left;color:#f2c27e;font-size:11px;padding:3px 0}.video-controls #audio-button{background:#334c3c;color:#f5f3e7;border-color:#64775a}.media-caption #audio-status[data-state="blocked"],.media-caption #audio-status[data-state="error"]{color:#f2c27e}
 @media(max-width:640px){.video-controls .control-buttons{flex-wrap:wrap}.control-buttons #capture-button,.control-buttons #audio-button{flex:1 1 130px;justify-content:center;padding:10px 8px}.media-caption{width:100%}}
+
+.owned-group {
+  min-width: 0;
+  padding: 20px 0;
+  border-top: 1px solid var(--line);
+}
+.owned-group-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.owned-group h3 { font-size: 19px; overflow-wrap: anywhere; }
+.owned-group h4 { font-size: 12px; margin-bottom: 10px; }
+.group-cameras, .group-members { margin-top: 18px; }
+.owned-room h5 { font-size: 14px; overflow-wrap: anywhere; }
+.owned-group .account-form { max-width: 570px; margin-top: 12px; }
+.owned-group label.field { font-size: 12px; font-weight: 550; }
+.owned-group label.field input { display: block; margin-top: 7px; }
+.group-members {
+  padding-top: 15px;
+  border-top: 1px solid var(--line);
+}
+.room-members { padding: 0; list-style: none; }
+.room-member {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+.room-member span { overflow-wrap: anywhere; }
+.room-member .text-button { font-size: 11px; }
+.group-members > .field-hint { margin-top: 10px; }
+.group-feedback { margin: 14px 0 0; }
+.dashboard-group-name {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.viewer-camera-picker { max-width: 340px; }
+.viewer-camera-picker select { font-size: 14px; }

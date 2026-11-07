@@ -20,8 +20,10 @@ let monitor = null;
 let room = null;
 let generation = 0;
 let navigationSequence = 0;
+let roomsLoadSequence = 0;
 let pollTimer = null;
 let roomPollSequence = 0;
+let cameraPickerRequest = null;
 let clockTimer = null;
 let qrURL = null;
 let toastTimer = null;
@@ -81,8 +83,25 @@ function saveGuest(binding) {
   try { localStorage.setItem(GUEST_STORAGE_KEY, JSON.stringify({ role: 'viewer', viewer: binding })); localStorage.setItem('barkodd.guest-active.v2', 'true'); }
   catch (_) { /* Guest links remain usable without browser storage. */ }
 }
+function accountBinding(id) {
+  return bindings.rooms[id] || { id, account: true };
+}
+function forgetCameraBindings(cameras) {
+  for (const { id } of cameras) {
+    delete bindings.rooms[id];
+    for (const role of ['host', 'viewer']) if (bindings[role]?.id === id) bindings[role] = null;
+  }
+  if (!bindings[bindings.role]) bindings.role = null;
+  saveBindings();
+}
 function renderAccount() {
   const user = auth.user;
+  if ($('account-tools').dataset.userId !== (user?.id || '')) {
+    $('owned-rooms').replaceChildren();
+    $('rooms-empty').hidden = true;
+    $('users-list').replaceChildren();
+    $('users-panel').hidden = true;
+  }
   $('account-tools').hidden = !user;
   $('account-tools').dataset.userId = user?.id || '';
   $('account-name').textContent = auth.mode === 'none' ? 'Общий кабинет' : user?.username || '';
@@ -98,36 +117,124 @@ function renderAccount() {
   $('login-form').hidden = !!user || auth.mode !== 'multi_user' || authView !== 'login';
   $('register-form').hidden = !!user || auth.mode !== 'multi_user' || authView !== 'register';
   $('password-panel').hidden = true;
-  if (!user) { $('owned-rooms').replaceChildren(); $('users-list').replaceChildren(); $('users-panel').hidden = true; }
 }
 async function loadRooms() {
   if (!auth.user) return;
   const actor = authActor();
   const navigation = navigationSequence;
+  const sequence = ++roomsLoadSequence;
+  const current = () => sameActor(actor) && navigation === navigationSequence && sequence === roomsLoadSequence;
   try {
-    const data = await request('api/rooms');
-    if (!sameActor(actor) || navigation !== navigationSequence) return;
-    $('owned-rooms').replaceChildren();
-    $('rooms-empty').hidden = data.rooms.length > 0;
-    for (const entry of data.rooms) {
-      const card = textElement('article', 'owned-room', '');
-      const info = textElement('div', 'room-info', '');
-      info.append(textElement('h3', '', entry.name), textElement('p', 'field-hint', entry.monitoring ? 'Наблюдение включено' : entry.online ? 'Устройство в сети' : 'Устройство не в сети'));
-      const actions = textElement('div', 'account-actions', '');
-      for (const [role, label] of [['host', 'Устройство питомца'], ['viewer', 'Просмотр']]) {
-        const button = textElement('button', 'button button-secondary', label);
-        button.type = 'button';
-        button.addEventListener('click', () => void openRoom(role, bindings.rooms[entry.id] || { id: entry.id, account: true }, actor));
-        actions.append(button);
-      }
-      card.append(info, actions);
-      $('owned-rooms').append(card);
-    }
+    const { groups } = await request('api/groups', { actorID: actor.id });
+    if (!current()) return;
+    $('owned-rooms').replaceChildren(...groups.map(group => renderGroup(group, actor, navigation)));
+    $('rooms-empty').hidden = groups.length > 0;
   } catch (error) {
-    if (!sameActor(actor) || navigation !== navigationSequence) return;
+    if (!current()) return;
     if ([401, 403].includes(error.status)) await loseAccount(undefined, actor);
     else showError(error.message, true);
   }
+}
+
+function renderGroup(group, actor, navigation) {
+  const card = $('owned-group-template').content.firstElementChild.cloneNode(true);
+  const base = `api/groups/${encodeURIComponent(group.id)}`;
+  const current = () => sameActor(actor) && navigation === navigationSequence;
+  const feedback = card.querySelector('.group-feedback');
+  function showGroupError(message) {
+    feedback.textContent = message;
+    feedback.hidden = !message;
+  }
+  let pending = false;
+  async function change(button, path, options, after = loadRooms) {
+    if (!current() || identityBusy || pending || !card.isConnected) return;
+    pending = true;
+    button.disabled = true;
+    showGroupError('');
+    try {
+      const result = await request(base + path, { ...options, actorID: actor.id });
+      if (current()) await after(result);
+    } catch (error) {
+      if (!current()) return;
+      if (error.status === 401) {
+        await loadRooms();
+        if (current()) showError(error.message, true);
+      } else if (card.isConnected) showGroupError(error.message);
+      else showError(error.message, true);
+    } finally {
+      pending = false;
+      button.disabled = false;
+    }
+  }
+
+  card.querySelector('h3').textContent = group.name;
+  card.querySelector('.cameras-empty').hidden = group.cameras.length > 0;
+  const cameraList = card.querySelector('.camera-list');
+  for (const camera of group.cameras) {
+    const entry = textElement('article', 'owned-room', '');
+    const info = textElement('div', 'room-info', '');
+    const status = camera.monitoring ? 'Наблюдение включено' : camera.online ? 'Устройство в сети' : 'Устройство не в сети';
+    info.append(textElement('h5', '', camera.name), textElement('p', 'field-hint', status));
+    const actions = textElement('div', 'account-actions', '');
+    for (const [role, label] of [['host', 'Устройство питомца'], ['viewer', 'Просмотр']]) {
+      const button = textElement('button', 'button button-secondary', label);
+      button.type = 'button';
+      button.addEventListener('click', () => { if (current()) void openRoom(role, accountBinding(camera.id), actor); });
+      actions.append(button);
+    }
+    entry.append(info, actions);
+    cameraList.append(entry);
+  }
+  const addCamera = card.querySelector('.add-room-camera');
+  addCamera.addEventListener('submit', event => {
+    event.preventDefault();
+    const name = addCamera.elements.name.value.trim();
+    if (!name) { showGroupError('Дайте камере название.'); return; }
+    void change(addCamera.querySelector('button'), '/cameras', { method: 'POST', body: { name } }, async camera => {
+      if (camera.ownerId !== actor.id) { await refreshAuth(); return; }
+      await openRoom('host', { id: camera.id, account: true, viewerToken: camera.viewerToken }, actor);
+    });
+  });
+  const deleteGroup = card.querySelector('.delete-group');
+  deleteGroup.addEventListener('click', () => {
+    if (!window.confirm(`Удалить комнату «${group.name}» со всеми камерами, их историей и фотографиями? Гостевые ссылки перестанут работать.`)) return;
+    void change(deleteGroup, '', { method: 'DELETE' }, async result => {
+      forgetCameraBindings(group.cameras);
+      toast(result?.cleanupPending ? 'Комната удалена. Сервер завершит очистку фотографий.' : 'Комната и все её камеры удалены.');
+      await loadRooms();
+    });
+  });
+
+  const members = card.querySelector('.group-members');
+  members.hidden = auth.mode !== 'multi_user';
+  if (members.hidden) return card;
+  const memberList = members.querySelector('.room-members');
+  for (const member of group.members) {
+    const row = textElement('li', 'room-member', '');
+    const label = member.username + (member.id === actor.id ? ' (вы)' : '') + (member.disabled ? ' · заблокирован' : '');
+    const remove = textElement('button', 'text-button', 'Удалить хозяина');
+    remove.type = 'button';
+    remove.disabled = group.members.length === 1;
+    if (remove.disabled) remove.title = 'В комнате должен остаться хотя бы один хозяин';
+    remove.addEventListener('click', () => {
+      const prompt = member.id === actor.id ? `Выйти из комнаты «${group.name}»?` : `Удалить хозяина «${member.username}» из комнаты «${group.name}»?`;
+      if (!window.confirm(prompt)) return;
+      void change(remove, `/members/${encodeURIComponent(member.id)}`, { method: 'DELETE' }, async () => {
+        if (member.id === actor.id) forgetCameraBindings(group.cameras);
+        await loadRooms();
+      });
+    });
+    row.append(textElement('span', '', label), remove);
+    memberList.append(row);
+  }
+  const addMember = members.querySelector('.add-room-member');
+  addMember.addEventListener('submit', event => {
+    event.preventDefault();
+    const username = addMember.elements.username.value.trim();
+    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(username)) { showGroupError('Введите логин существующего аккаунта.'); return; }
+    void change(addMember.querySelector('button'), '/members', { method: 'POST', body: { username } });
+  });
+  return card;
 }
 async function loseAccount(message = 'Сессия завершена. Войдите снова, чтобы открыть свои комнаты.', actor = authActor()) {
   if (!sameActor(actor) || !auth.user) return;
@@ -307,7 +414,7 @@ function parsePairingLink(value) {
   const params = new URLSearchParams(link.hash.slice(1));
   const id = params.get('room');
   const viewerToken = params.get('key');
-  if (!id || !/^[a-zA-Z0-9_-]{1,128}$/.test(id) || !viewerToken || viewerToken.length > 256) throw new Error('В ссылке не хватает комнаты или ключа. Скопируйте полную ссылку с устройства питомца.');
+  if (!id || !/^[a-zA-Z0-9_-]{1,128}$/.test(id) || !viewerToken || viewerToken.length > 256) throw new Error('В ссылке не хватает камеры или ключа. Скопируйте полную ссылку с устройства питомца.');
   return { id, viewerToken };
 }
 
@@ -330,6 +437,10 @@ async function releaseRoom() {
   active = null;
   room = null;
   api = null;
+  $('viewer-camera-picker').hidden = true;
+  $('viewer-camera').replaceChildren();
+  $('dashboard-group-name').hidden = true;
+  $('dashboard-group-name').textContent = '';
   $('camera-video').srcObject = null;
   $('camera-video').muted = true;
   $('camera-video').hidden = true;
@@ -366,7 +477,7 @@ async function releaseRoom() {
   try { if (previous) await previous.destroy(); } catch (_) { /* Teardown remains local when the server is unavailable. */ }
 }
 
-async function showWelcome(message = '') {
+async function showWelcome(message = '', verifyAccount = false) {
   const actor = authActor();
   const navigation = ++navigationSequence;
   await releaseRoom();
@@ -381,16 +492,24 @@ async function showWelcome(message = '') {
   showError(message, true);
   document.title = 'BarkOdd — рядом, даже издалека';
   renderAccount();
-  if (auth.user) await loadRooms();
+  if (verifyAccount) await refreshAuth();
+  if (sameActor(actor) && navigation === navigationSequence && auth.user) await loadRooms();
 }
 
 async function invalidateSession(error) {
   if (!active) return;
-  if (active.binding.account && error.status !== 404) { await loseAccount(); return; }
-  const role = active.role;
-  if (active.binding.account) { delete bindings.rooms[active.binding.id]; bindings[role] = null; bindings.role = null; saveBindings(); }
-  else { try { localStorage.removeItem(GUEST_STORAGE_KEY); } catch (_) {} if (!auth.user) bindings = emptyBindings(); }
-  await showWelcome(error.status === 404 ? 'Комната не найдена. Создайте новую комнату или получите актуальную ссылку.' : role === 'viewer' ? 'Ссылка больше не действует. На устройстве питомца получите новую ссылку или QR-код.' : 'Ключ управления больше не действует. Создайте новую комнату на этом устройстве.');
+  const missing = error.status === 404;
+  if (active.binding.account) {
+    forgetCameraBindings([active.binding]);
+    await showWelcome(missing ? 'Камера не найдена.' : 'Доступ к камере отозван.', !missing);
+    return;
+  }
+  try {
+    localStorage.removeItem(GUEST_STORAGE_KEY);
+    localStorage.removeItem('barkodd.guest-active.v2');
+  } catch (_) {}
+  if (!auth.user) bindings = emptyBindings();
+  await showWelcome(missing ? 'Камера не найдена. Получите актуальную ссылку.' : 'Ссылка больше не действует. На устройстве питомца получите новую ссылку или QR-код.');
 }
 
 async function chooseRole(role) {
@@ -405,7 +524,7 @@ async function chooseRole(role) {
   $('setup-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
-async function openRoom(role, binding, actor = authActor()) {
+async function openRoom(role, binding, actor = authActor(), viewing = null) {
   if (!sameActor(actor) || binding.account && !auth.user || identityBusy) return;
   const navigation = ++navigationSequence;
   await releaseRoom();
@@ -424,10 +543,12 @@ async function openRoom(role, binding, actor = authActor()) {
   $('welcome').hidden = true;
   $('dashboard').hidden = false;
   $('switch-role').hidden = false;
-  $('role-label').textContent = role === 'host' ? 'Устройство питомца' : 'Устройство человека';
+  $('role-label').textContent = binding.account ? 'Мои комнаты' : 'Сменить устройство';
   $('room-title').textContent = 'Подключаемся…';
   $('host-settings').hidden = role !== 'host';
   $('pairing-panel').hidden = role !== 'host';
+  $('delete-room-panel').hidden = true;
+  $('delete-room').disabled = false;
   $('host-note').hidden = role !== 'host';
   $('viewer-note').hidden = role !== 'viewer';
   $('stream-note').hidden = role !== 'viewer';
@@ -441,6 +562,7 @@ async function openRoom(role, binding, actor = authActor()) {
   $('last-noise-detail').textContent = 'Здесь появится время события';
   $('settings-feedback').textContent = '';
   $('local-pairing-hint').hidden = !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+  mediaBusy = !!viewing;
   showError('');
   monitor = createMonitor({
     api,
@@ -493,7 +615,7 @@ async function openRoom(role, binding, actor = authActor()) {
       const video = $('remote-video');
       if (video.srcObject !== stream) video.srcObject = stream;
       if (!stream) { video.pause(); viewerLive = false; }
-      else video.play().catch(() => showError('Не удалось воспроизвести видео. Выключите и включите просмотр.'));
+      else video.play().catch(() => { if (generation === current) showError('Не удалось воспроизвести видео. Выключите и включите просмотр.'); });
       renderMedia();
     },
     onError(error) {
@@ -506,7 +628,31 @@ async function openRoom(role, binding, actor = authActor()) {
   await pollRoom(current);
   if (generation !== current) return;
   if (role === 'host') { void loadPairingQR(); void loadDevices(); }
+  if (viewing && sameActor(actor)) {
+    mediaBusy = false;
+    if (room) void setViewerChannels(viewing.video, viewing.audio);
+    else renderMedia();
+  }
   clockTimer = setInterval(() => { if (room) renderTimes(); }, 10000);
+}
+
+async function loadViewerCameras(groupID, cameraID, current) {
+  if (cameraPickerRequest === current) return;
+  cameraPickerRequest = current;
+  const actor = authActor();
+  try {
+    const { cameras } = await request(`api/groups/${encodeURIComponent(groupID)}`, { actorID: actor.id });
+    if (!sameActor(actor) || current !== generation) return;
+    const select = $('viewer-camera');
+    if (select.options.length !== cameras.length || cameras.some(({ id, name }, index) =>
+      select.options[index].value !== id || select.options[index].text !== name
+    )) {
+      select.replaceChildren(...cameras.map(({ id, name }) => new Option(name, id)));
+    }
+    select.value = cameraID;
+    $('viewer-camera-picker').hidden = cameras.length < 2 || select.selectedIndex === -1;
+  } catch (_) { /* Camera polling handles access changes and retries the picker. */ }
+  finally { if (cameraPickerRequest === current) cameraPickerRequest = null; }
 }
 
 async function pollRoom(current) {
@@ -524,6 +670,9 @@ async function pollRoom(current) {
     $('delete-room-panel').hidden = active.role !== 'host';
     if (room.mediaTransport === 'websocket' || room.mediaTransport === 'webrtc') mediaTransport = room.mediaTransport;
     $('room-title').textContent = room.name;
+    const groupName = active.binding.account && room.groupName !== room.name ? room.groupName : '';
+    $('dashboard-group-name').hidden = !groupName;
+    $('dashboard-group-name').textContent = groupName || '';
     document.title = `${room.name} · BarkOdd`;
     if (wasOffline) showError('');
     if (active.role === 'host' && !settingsLoaded) { fillSettings(room.settings || DEFAULT_SETTINGS); settingsLoaded = true; }
@@ -532,6 +681,9 @@ async function pollRoom(current) {
     renderStatus();
     renderHistory();
     renderMedia();
+    if (active.role === 'viewer' && active.binding.account && room.groupId) {
+      void loadViewerCameras(room.groupId, room.id, current);
+    }
   } catch (error) {
     if (current !== generation || sequence !== roomPollSequence) return;
     if ([401, 403, 404].includes(error.status)) { await invalidateSession(error); return; }
@@ -567,7 +719,7 @@ function renderTimes() {
 
 async function clearHistory() {
   if (!active?.binding.account || !api || clearingHistory) return;
-  if (!window.confirm('Очистить все шумные моменты и фотографии этой комнаты? Наблюдение продолжится. Это действие нельзя отменить.')) return;
+  if (!window.confirm('Очистить все шумные моменты и фотографии этой камеры? Наблюдение продолжится. Это действие нельзя отменить.')) return;
   const current = generation;
   const currentAPI = api;
   clearingHistory = true;
@@ -836,7 +988,7 @@ async function openPhoto(event) {
 
 async function toggleCapture() {
   if (!monitor || mediaBusy) return;
-  if (active.role === 'viewer') return toggleViewerChannel('video');
+  if (active.role === 'viewer') return setViewerChannels(!viewerWatching, viewerListening);
   const current = generation;
   const currentMonitor = monitor;
   const isHost = active.role === 'host';
@@ -867,11 +1019,11 @@ async function toggleCapture() {
   }
 }
 
-async function toggleViewerChannel(channel) {
+async function setViewerChannels(video, audio) {
   if (!monitor || active?.role !== 'viewer' || mediaBusy) return;
   const current = generation, currentMonitor = monitor;
-  if (channel === 'audio') viewerListening = !viewerListening;
-  else viewerWatching = !viewerWatching;
+  viewerWatching = video;
+  viewerListening = audio;
   viewerLive = false;
   mediaBusy = true;
   showError('');
@@ -883,7 +1035,7 @@ async function toggleViewerChannel(channel) {
     if (generation !== current) return;
     viewerWatching = viewerListening = false;
     await currentMonitor.stopViewer();
-    showError(error.message || 'Не удалось включить трансляцию.');
+    if (generation === current) showError(error.message || 'Не удалось включить трансляцию.');
   } finally {
     if (generation === current) { mediaBusy = false; renderMedia(); }
   }
@@ -959,35 +1111,42 @@ $('approval-form').addEventListener('submit', async event => {
   } catch (error) { if (current === generation) showError(error.message); }
 });
 $('delete-room').addEventListener('click', async () => {
-  if (active?.role !== 'host') return;
-  if (!window.confirm('Удалить комнату, всю историю и фотографии? Ссылки перестанут работать. Это действие нельзя отменить.')) return;
+  if (active?.role !== 'host' || !active.binding.account || identityBusy) return;
+  if (!window.confirm('Удалить камеру, её историю и фотографии? Гостевые ссылки этой камеры перестанут работать.')) return;
   const current = generation;
-  const { id } = active.binding;
+  const actor = authActor();
+  const binding = active.binding;
+  const currentAPI = api;
   const button = $('delete-room');
   button.disabled = true;
   try {
     await monitor?.stopHost();
-    if (current !== generation) return;
-    const result = await request(`api/rooms/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    delete bindings.rooms[id];
-    for (const role of ['host', 'viewer']) { if (bindings[role]?.id === id) bindings[role] = null; }
-    if (!bindings[bindings.role]) bindings.role = null;
-    saveBindings();
+    if (current !== generation || !sameActor(actor)) return;
+    const result = await currentAPI.delete('');
+    if (!sameActor(actor)) return;
+    forgetCameraBindings([binding]);
     if (current === generation) {
+      toast(result?.cleanupPending ? 'Камера удалена. Сервер завершит очистку фотографий.' : 'Камера, её история и фотографии удалены.');
       await showWelcome();
-      toast(result.cleanupPending ? 'Доступ к комнате закрыт. Сервер повторит очистку фотографий.' : 'Комната, история и фотографии удалены.');
     }
   } catch (error) { if (current === generation) showError(error.message); }
-  finally { button.disabled = false; }
+  finally { if (current === generation) button.disabled = false; }
 });
 $('viewer-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   try { const binding = parsePairingLink($('viewer-link').value.trim()); $('viewer-link').value = ''; await openRoom('viewer', binding); }
   catch (error) { showError(error.message, true); }
 });
+$('viewer-camera').addEventListener('change', event => {
+  const select = event.currentTarget;
+  if (!active?.binding.account || active.role !== 'viewer' || active.binding.id === select.value) return;
+  if (identityBusy || mediaBusy || !select.value) { select.value = active.binding.id; return; }
+  const viewing = viewerWatching || viewerListening ? { video: viewerWatching, audio: viewerListening } : null;
+  void openRoom('viewer', accountBinding(select.value), authActor(), viewing);
+});
 $('capture-button').addEventListener('click', () => void toggleCapture());
 $('clear-history').addEventListener('click', () => void clearHistory());
-$('audio-button').addEventListener('click', () => void toggleViewerChannel('audio'));
+$('audio-button').addEventListener('click', () => void setViewerChannels(viewerWatching, !viewerListening));
 $('audio-retry').addEventListener('click', () => { void monitor?.resumeAudio().catch(error => showError(error.message)); });
 $('sensitivity').addEventListener('change', () => { settingsDirty = true; sensitivityDirty = true; $('settings-feedback').textContent = 'Есть несохранённые изменения'; });
 $('snapshot-interval').addEventListener('change', () => { settingsDirty = true; $('settings-feedback').textContent = 'Есть несохранённые изменения'; });

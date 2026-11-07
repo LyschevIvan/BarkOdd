@@ -341,7 +341,7 @@ test('stale tabs cannot create, list or log out using a different account cookie
   await switcher.locator('#code-form button').click();
   await expect(switcher.locator('#account-name')).toHaveText('admin');
   const before = await (await switcher.request.get(endpoint(baseURL, 'api/rooms'))).json();
-  const listResponse = staleList.waitForResponse(response => response.request().method() === 'GET' && response.url().endsWith('/api/rooms'));
+  const listResponse = staleList.waitForResponse(response => response.request().method() === 'GET' && response.url().endsWith('/api/groups'));
   await staleList.locator('#refresh-rooms').click();
   expect((await listResponse).status()).toBe(401);
   const logoutResponse = staleLogout.waitForResponse(response => response.url().endsWith('/api/auth/logout'));

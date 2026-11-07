@@ -65,6 +65,30 @@
           <form id="register-form" class="account-form" hidden><div class="field"><label for="register-username">Новый логин</label><input id="register-username" autocomplete="username" minlength="3" maxlength="32" pattern="[a-zA-Z0-9_.-]{3,32}" required><p class="field-hint">3–32 символа: латинские буквы, цифры, точка, дефис и подчёркивание.</p></div><div class="field"><label for="register-password">Новый пароль</label><input id="register-password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required><p class="field-hint">От 12 до 128 символов.</p></div><div class="field"><label for="register-confirm">Повторите пароль</label><input id="register-confirm" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></div><button class="button button-primary" type="submit">Зарегистрироваться</button></form>
         </section>
         <section id="account-panel" class="account-panel panel" hidden aria-labelledby="rooms-title"><div class="section-heading"><div><span class="eyebrow">ВАШ ЛИЧНЫЙ КАБИНЕТ</span><h2 id="rooms-title">Мои комнаты</h2></div><button id="refresh-rooms" class="text-button" type="button">Обновить</button></div><p id="rooms-empty">Комнат пока нет. Создайте первое уютное место для питомца.</p><div id="owned-rooms" class="owned-rooms"></div><button id="users-toggle" class="text-button" type="button" hidden>Пользователи</button><div id="users-panel" hidden><h3>Пользователи</h3><p class="field-hint">Управление учётными записями не открывает доступ к чужим комнатам.</p><div id="users-list"></div></div></section>
+        <template id="owned-group-template">
+          <article class="owned-group">
+            <div class="owned-group-heading"><h3></h3><button class="text-button delete-group" type="button">Удалить комнату</button></div>
+            <div class="group-cameras">
+              <h4>Камеры</h4>
+              <p class="field-hint cameras-empty">В комнате пока нет камер.</p>
+              <div class="camera-list"></div>
+              <form class="account-form add-room-camera">
+                <label class="field">Название камеры<input name="name" maxlength="60" placeholder="Например, у лежанки" autocomplete="off" required></label>
+                <button class="button button-secondary" type="submit">Добавить камеру</button>
+              </form>
+            </div>
+            <div class="group-members">
+              <h4>Хозяева</h4>
+              <ul class="room-members"></ul>
+              <form class="account-form add-room-member">
+                <label class="field">Логин хозяина<input name="username" minlength="3" maxlength="32" autocomplete="off" spellcheck="false" required></label>
+                <button class="button button-secondary" type="submit">Добавить хозяина</button>
+              </form>
+              <p class="field-hint">Все хозяева могут управлять комнатой. Чтобы отозвать уже выданную гостевую ссылку, выпустите новую для этой камеры.</p>
+            </div>
+            <p class="notice notice-error group-feedback" role="alert" hidden></p>
+          </article>
+        </template>
         <section id="password-panel" class="account-panel panel" hidden><h2>Сменить пароль</h2><p>После смены пароля потребуется войти снова на всех устройствах.</p><form id="password-form" class="account-form"><div class="field"><label for="current-password">Текущий пароль</label><input id="current-password" type="password" autocomplete="current-password" required></div><div class="field"><label for="new-password">Новый пароль</label><input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></div><button class="button button-primary" type="submit">Сменить пароль</button></form></section>
         <div class="role-section">
           <div class="section-overline"><span>01</span> ВЫБЕРИТЕ ЭТО УСТРОЙСТВО</div>
@@ -75,13 +99,13 @@
         </div>
         <div id="setup-panel" class="setup-panel" hidden>
           <form id="host-form" hidden>
-            <div><h2>Уютному месту — своё имя</h2><p>Так вы узнаете комнату на другом устройстве.</p></div>
+            <div><h2>Уютному месту — своё имя</h2><p>Комната появится в кабинете вместе с первой камерой.</p></div>
             <label for="room-name">Название комнаты</label>
             <div class="input-action"><input id="room-name" name="name" maxlength="60" placeholder="Например, дом Бруно" autocomplete="off" required><button class="button button-primary" type="submit">Создать комнату <svg class="icon"><use href="#i-arrow"/></svg></button></div>
           </form>
           <form id="viewer-form" hidden>
             <div><h2>Заглянем домой?</h2><p>Отсканируйте QR-код с устройства питомца камерой телефона или вставьте ссылку ниже.</p></div>
-            <label for="viewer-link">Ссылка на комнату</label>
+            <label for="viewer-link">Гостевая ссылка на камеру</label>
             <div class="input-action"><input id="viewer-link" name="link" type="text" placeholder="https://…/#room=…&key=…" autocomplete="off" spellcheck="false" required><button class="button button-primary" type="submit">Подключиться <svg class="icon"><use href="#i-arrow"/></svg></button></div>
           </form>
         </div>
@@ -90,8 +114,9 @@
       </section>
 
       <section id="dashboard" class="dashboard" hidden aria-labelledby="room-title">
-        <div class="dashboard-heading"><div><div id="dashboard-eyebrow" class="eyebrow">ВАШЕ МАЛЕНЬКОЕ МЕСТО СПОКОЙСТВИЯ</div><h1 id="room-title">Дома</h1></div><div class="status-pill" id="room-status"><span class="tiny-dot"></span><span id="room-status-text">Подключаемся</span></div></div>
+        <div class="dashboard-heading"><div><div id="dashboard-eyebrow" class="eyebrow">ВАШЕ МАЛЕНЬКОЕ МЕСТО СПОКОЙСТВИЯ</div><p id="dashboard-group-name" class="dashboard-group-name" hidden></p><h1 id="room-title">Дома</h1></div><div class="status-pill" id="room-status"><span class="tiny-dot"></span><span id="room-status-text">Подключаемся</span></div></div>
         <div id="dashboard-alert" class="notice notice-error" role="alert" hidden></div>
+        <div id="viewer-camera-picker" class="field viewer-camera-picker" hidden><label for="viewer-camera">Камера в комнате</label><select id="viewer-camera"></select></div>
         <div class="dashboard-layout">
           <div class="main-column">
             <section class="video-card" aria-label="Камера питомца">
@@ -114,8 +139,8 @@
           <aside class="side-column">
             <section id="owner-approval" class="panel" hidden><h2>Подтвердите комнату</h2><p>Для просмотра через сервер ретрансляции владелец должен подтвердить эту комнату на устройстве питомца.</p><form id="approval-form" hidden><button class="button button-secondary" type="submit">Подтвердить комнату</button></form></section>
             <section id="host-settings" class="panel" hidden aria-labelledby="settings-title"><div class="panel-title"><span class="eyebrow">УСТРОЙСТВО ПИТОМЦА</span><h2 id="settings-title">Всё под контролем</h2></div><form id="settings-form"><div class="field"><label for="video-device">Камера</label><select id="video-device"><option value="">Камера по умолчанию</option><option value="facing:environment" data-facing-mode="environment">Задняя камера</option><option value="facing:user" data-facing-mode="user">Фронтальная камера</option></select></div><div class="field"><label for="audio-device">Микрофон</label><select id="audio-device"><option value="">Микрофон по умолчанию</option></select></div><p id="device-hint" class="field-hint">Названия устройств появятся после разрешения доступа.</p><div class="panel-divider"></div><div class="field"><label for="sensitivity">Реагировать на звуки</label><select id="sensitivity" aria-describedby="sensitivity-hint"><option value="0.1">Только очень громкие</option><option value="0.03">Громкие</option><option value="0.01" selected>Обычные</option><option value="0.003">Тихие</option><option value="0.0005">Даже очень тихие</option></select><p id="sensitivity-hint" class="field-hint">Выберите самый тихий звук, который нужно замечать, и сохраните настройки. На максимуме может фиксироваться фоновый шум.</p></div><div id="level-container" class="sound-level"><span>Уровень звука</span><div class="level-track"><span id="sound-level-bar"></span></div><span id="sound-level-value">—</span></div><div class="field snapshot-field"><label for="snapshot-interval">Фото не чаще, чем раз в</label><select id="snapshot-interval"><option value="10000">10 секунд</option><option value="30000" selected>30 секунд</option><option value="60000">1 минуту</option><option value="120000">2 минуты</option><option value="300000">5 минут</option></select></div><button id="save-settings" class="button button-secondary full-width" type="submit">Сохранить настройки</button><p id="settings-feedback" class="field-hint" role="status"></p></form></section>
-            <section id="pairing-panel" class="panel pairing-panel" hidden aria-labelledby="pairing-title"><span class="eyebrow">НА ДРУГОМ УСТРОЙСТВЕ</span><h2 id="pairing-title">Возьмите дом с собой</h2><p>Отсканируйте камерой телефона — и комната откроется.</p><p id="local-pairing-hint" class="notice notice-error" hidden>Локальная проверка: эта ссылка работает только на этом компьютере. Для телефона откройте приложение по публичному HTTPS-адресу.</p><div class="qr-wrap" id="qr-wrap"><img id="pairing-qr" alt="QR-код для подключения устройства человека" width="184" height="184" hidden><span id="qr-placeholder">Готовим QR-код…</span></div><button id="copy-link" class="button button-primary full-width"><svg class="icon"><use href="#i-copy"/></svg> Скопировать ссылку</button><button id="regenerate-key" class="text-button regenerate-key">Выпустить новую ссылку</button><p class="pairing-footnote"><svg class="icon"><use href="#i-shield"/></svg> У кого есть ссылка, тот может смотреть и слушать. Новая ссылка отключит старую.</p></section>
-            <section id="delete-room-panel" class="panel" hidden><h2>Удаление комнаты</h2><p>История и фотографии будут удалены. Все ссылки перестанут работать.</p><button id="delete-room" class="button button-secondary" type="button">Удалить комнату</button></section>
+            <section id="pairing-panel" class="panel pairing-panel" hidden aria-labelledby="pairing-title"><span class="eyebrow">НА ДРУГОМ УСТРОЙСТВЕ</span><h2 id="pairing-title">Возьмите дом с собой</h2><p>Отсканируйте QR-код камерой телефона, чтобы открыть гостевой просмотр этой камеры.</p><p id="local-pairing-hint" class="notice notice-error" hidden>Локальная проверка: эта ссылка работает только на этом компьютере. Для телефона откройте приложение по публичному HTTPS-адресу.</p><div class="qr-wrap" id="qr-wrap"><img id="pairing-qr" alt="QR-код для подключения устройства человека" width="184" height="184" hidden><span id="qr-placeholder">Готовим QR-код…</span></div><button id="copy-link" class="button button-primary full-width"><svg class="icon"><use href="#i-copy"/></svg> Скопировать ссылку</button><button id="regenerate-key" class="text-button regenerate-key">Выпустить новую ссылку</button><p class="pairing-footnote"><svg class="icon"><use href="#i-shield"/></svg> У кого есть ссылка, тот может смотреть и слушать. Новая ссылка отключит старую.</p></section>
+            <section id="delete-room-panel" class="panel" hidden><h2>Удаление камеры</h2><p>История и фотографии этой камеры будут удалены. Её ссылки перестанут работать.</p><button id="delete-room" class="button button-secondary" type="button">Удалить камеру</button></section>
             <section id="latest-photo-panel" class="panel latest-photo-panel" hidden><span class="eyebrow">ПОСЛЕДНИЙ СНИМОК</span><h2>Один домашний момент</h2><button id="latest-photo-button" class="latest-photo-button" aria-label="Открыть последнее фото"><img id="latest-photo" alt="Последняя фотография во время шума"></button><time id="latest-photo-time" class="muted"></time></section>
             <section id="viewer-note" class="care-note" hidden><span class="care-note-icon"><svg class="icon"><use href="#i-paw"/></svg></span><h3>Можно просто заглянуть</h3><p>Слушайте звуки дома, смотрите видео или включайте оба сразу. История шума и фото собирается, пока дома работает наблюдение.</p><span class="note-line"></span><p class="small">Выключение трансляции не останавливает историю.<br>Уведомлений в фоне пока нет.</p></section>
             <div id="host-note" class="care-note compact" hidden><svg class="icon"><use href="#i-check"/></svg><p>Зрители по вашей ссылке могут включать видео и звук. Оставьте эту вкладку открытой, ноутбук — на зарядке, а спящий режим — выключенным.</p></div>
