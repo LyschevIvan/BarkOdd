@@ -89,7 +89,7 @@ func (s *Server) eventRoomLocked(w http.ResponseWriter, r *http.Request, roomID 
 		fail(w, 404, "Комната не найдена")
 		return nil
 	}
-	role := s.authorizeLocked(r, current)
+	role, _ := s.authorizeLocked(r, current)
 	if role == "" {
 		fail(w, 401, "Неверный или отозванный ключ комнаты")
 		return nil
@@ -146,7 +146,7 @@ func (s *Server) reserveEvent(w http.ResponseWriter, r *http.Request, roomID str
 	if current == nil {
 		return nil
 	}
-	if !validEventSession(current, body.SessionID) {
+	if !s.eventSessionAllowedLocked(r, current, body.SessionID) {
 		fail(w, 403, "Сессия камеры завершена или заменена")
 		return nil
 	}
@@ -226,7 +226,7 @@ func (s *Server) commitEvent(w http.ResponseWriter, r *http.Request, reservation
 	if current == nil {
 		return
 	}
-	if current != reservation.current || !validEventSession(current, body.SessionID) || (s.config.AuthMode != "none" && current.SourceAuthSession != s.sessionKey(r)) {
+	if current != reservation.current || !s.eventSessionAllowedLocked(r, current, body.SessionID) {
 		fail(w, 403, "Сессия камеры завершена или заменена")
 		return
 	}
@@ -330,6 +330,7 @@ func (s *Server) getPhoto(w http.ResponseWriter, r *http.Request, current *room,
 	fail(w, 404, "Фотография не найдена")
 }
 
-func validEventSession(current *room, sessionID string) bool {
-	return identifier.MatchString(sessionID) && current.SessionID == sessionID && !slices.Contains(current.RetiredSessions, sessionID)
+func (s *Server) eventSessionAllowedLocked(r *http.Request, current *room, sessionID string) bool {
+	return identifier.MatchString(sessionID) && current.SessionID == sessionID && !slices.Contains(current.RetiredSessions, sessionID) &&
+		(s.config.AuthMode == "none" || current.SourceAuthSession == s.sessionKey(r))
 }

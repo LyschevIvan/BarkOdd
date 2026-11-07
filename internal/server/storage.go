@@ -12,13 +12,12 @@ import (
 	"regexp"
 	"sort"
 	"time"
-	"unicode/utf8"
 )
 
 var photoName = regexp.MustCompile(`^[A-Za-z0-9_-]{16}_[A-Za-z0-9_-]{16}_[A-Za-z0-9_-]{16}\.jpg$`)
 
 func validateStored(r *room) error {
-	if !storageID.MatchString(r.ID) || !utf8.ValidString(r.Name) || utf8.RuneCountInString(r.Name) < 1 || utf8.RuneCountInString(r.Name) > 60 || r.CreatedAt.IsZero() {
+	if !storageID.MatchString(r.ID) || (r.GroupID != "" && !storageID.MatchString(r.GroupID)) || !validRoomName(r.Name) || r.CreatedAt.IsZero() {
 		return errors.New("invalid room identity")
 	}
 	for _, hash := range []string{r.HostHash, r.ViewerHash} {
@@ -90,11 +89,15 @@ func atomicWrite(path string, data []byte) error {
 		return err
 	}
 	// Directory sync is best effort: some supported filesystems do not expose it.
-	if d, openErr := os.Open(filepath.Dir(path)); openErr == nil {
+	syncDirectory(filepath.Dir(path))
+	return nil
+}
+
+func syncDirectory(path string) {
+	if d, err := os.Open(path); err == nil {
 		_ = d.Sync()
 		_ = d.Close()
 	}
-	return nil
 }
 func (s *Server) save(r *room) error {
 	data, err := json.Marshal(r)
@@ -181,6 +184,7 @@ func (s *Server) verifyPhotos() error {
 
 func (s *Server) sweep() error {
 	s.retryRoomDeletions()
+	s.retryGroupDeletions()
 	now := s.now()
 	for _, current := range s.rooms {
 		updated, removed, changed := compact(current, now)

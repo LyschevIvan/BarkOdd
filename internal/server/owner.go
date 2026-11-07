@@ -36,7 +36,7 @@ func (s *Server) listRooms(w http.ResponseWriter, ownerID string) {
 	}
 	rooms := []summary{}
 	for _, room := range s.rooms {
-		if room.OwnerID == ownerID {
+		if s.groupMemberLocked(s.groups[room.GroupID], ownerID) {
 			online := s.roomFreshLocked(room)
 			rooms = append(rooms, summary{room.ID, room.Name, room.CreatedAt, online, online && room.Monitoring})
 		}
@@ -45,29 +45,39 @@ func (s *Server) listRooms(w http.ResponseWriter, ownerID string) {
 	writeJSON(w, 200, map[string]any{"rooms": rooms})
 }
 
-// Called with s.mu held, after a session is removed or an owner is disabled.
-func (s *Server) invalidateAuthLocked(sessionKey, ownerID string) {
-	if sessionKey == "" && ownerID == "" {
-		return
-	}
+// Revoke only the affected account's streams and camera session. Guest
+// capabilities survive while any owner of the shared room remains enabled.
+// A group ID limits revocation to that group, otherwise it applies globally.
+func (s *Server) invalidateAccessLocked(groupID, sessionKey, ownerID string) {
 	for c := range s.streams {
-		room := s.rooms[c.roomID]
-		if (sessionKey != "" && c.authSession == sessionKey) || (ownerID != "" && room != nil && room.OwnerID == ownerID) {
+		current := s.rooms[c.roomID]
+		if current == nil || (groupID != "" && current.GroupID != groupID) {
+			continue
+		}
+		affected := sessionKey != "" && c.authSession == sessionKey
+		if ownerID != "" {
+			pendingSession := s.auth.sessions[c.authSession]
+			affected = affected || c.ownerID == ownerID ||
+				(!c.authenticated && pendingSession != nil && pendingSession.UserID == ownerID) ||
+				(c.ownerID == "" && !s.guestCameraAllowedLocked(current))
+		}
+		if affected {
 			s.closeStreamLocked(c, streamClose{code: 1008, status: 401, message: "Сессия завершена или доступ отозван"})
 		}
 	}
-	for _, room := range s.rooms {
-		matches := ownerID != "" && room.OwnerID == ownerID
-		if matches || (sessionKey != "" && room.SourceAuthSession == sessionKey) {
-			if room.SessionID != "" {
-				retireSession(room, room.SessionID)
-			}
-			room.Monitoring = false
-			room.LastSeenAt = nil
-			room.SourceAuthSession = ""
-			room.rtcEpoch++
-			s.refreshSourceLocked(room)
+	for _, current := range s.rooms {
+		if groupID != "" && current.GroupID != groupID {
+			continue
 		}
+		if (ownerID == "" || current.SourceOwnerID != ownerID) && (sessionKey == "" || current.SourceAuthSession != sessionKey) {
+			continue
+		}
+		retireSession(current, current.SessionID)
+		current.Monitoring = false
+		current.LastSeenAt = nil
+		current.SourceOwnerID = ""
+		current.SourceAuthSession = ""
+		current.rtcEpoch++
+		s.refreshSourceLocked(current)
 	}
-
 }

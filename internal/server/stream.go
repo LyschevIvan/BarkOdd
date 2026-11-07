@@ -254,14 +254,11 @@ func (s *Server) authenticateStream(c *streamClient, kind websocket.MessageType,
 	if current == nil {
 		return reject(401, "Комната недоступна")
 	}
-	if !s.ownerEnabledLocked(current.OwnerID) {
-		return reject(401, "Комната недоступна")
-	}
 	hash := ""
 	role := auth.Role
 	if auth.Token != "" {
 		hash = tokenHash(auth.Token)
-		if subtle.ConstantTimeCompare([]byte(hash), []byte(current.ViewerHash)) != 1 {
+		if !s.guestCameraAllowedLocked(current) || subtle.ConstantTimeCompare([]byte(hash), []byte(current.ViewerHash)) != 1 {
 			return reject(401, "Неверный или отозванный ключ комнаты")
 		}
 		if role != "viewer" {
@@ -271,11 +268,11 @@ func (s *Server) authenticateStream(c *streamClient, kind websocket.MessageType,
 	} else {
 		ownerID := ""
 		if s.config.AuthMode == "none" {
-			ownerID = "owner"
+			ownerID = authOwnerID
 		} else if user := s.sessionUserLocked(c.authSession); user != nil {
 			ownerID = user.ID
 		}
-		if ownerID == "" || ownerID != current.OwnerID {
+		if !s.groupMemberLocked(s.groups[current.GroupID], ownerID) {
 			return reject(401, "Войдите как владелец комнаты")
 		}
 		c.ownerID = ownerID
@@ -289,7 +286,7 @@ func (s *Server) authenticateStream(c *streamClient, kind websocket.MessageType,
 		if !identifier.MatchString(auth.SessionID) {
 			return reject(400, "Укажите идентификатор сессии камеры")
 		}
-		if current.SessionID != auth.SessionID || slices.Contains(current.RetiredSessions, auth.SessionID) || (s.config.AuthMode != "none" && current.SourceAuthSession != c.authSession) {
+		if current.SessionID != auth.SessionID || current.SourceOwnerID != c.ownerID || slices.Contains(current.RetiredSessions, auth.SessionID) || (s.config.AuthMode != "none" && current.SourceAuthSession != c.authSession) {
 			return reject(403, "Сессия камеры завершена или заменена")
 		}
 		if !s.roomFreshLocked(current) {
@@ -331,11 +328,11 @@ func (s *Server) validStreamLocked(c *streamClient) bool {
 		return false
 	}
 	r := s.rooms[c.roomID]
-	if r == nil || !s.ownerEnabledLocked(r.OwnerID) {
+	if r == nil {
 		return false
 	}
 	if c.ownerID != "" {
-		if c.ownerID != r.OwnerID {
+		if !s.groupMemberLocked(s.groups[r.GroupID], c.ownerID) {
 			return false
 		}
 		if s.config.AuthMode != "none" {
@@ -344,13 +341,13 @@ func (s *Server) validStreamLocked(c *streamClient) bool {
 				return false
 			}
 		}
-	} else if c.role != "viewer" || c.hash != r.ViewerHash || c.pairingVersion != r.PairingVersion {
+	} else if !s.guestCameraAllowedLocked(r) || c.role != "viewer" || c.hash != r.ViewerHash || c.pairingVersion != r.PairingVersion {
 		return false
 	}
 	if c.role == "viewer" {
 		return true
 	}
-	return c == r.source && c.sessionID == r.SessionID && !slices.Contains(r.RetiredSessions, c.sessionID) && (s.config.AuthMode == "none" || c.authSession == r.SourceAuthSession)
+	return c == r.source && c.sessionID == r.SessionID && c.ownerID == r.SourceOwnerID && !slices.Contains(r.RetiredSessions, c.sessionID) && (s.config.AuthMode == "none" || c.authSession == r.SourceAuthSession)
 }
 func (s *Server) sourceActiveLocked(r *room) bool {
 	return r.source != nil && s.validStreamLocked(r.source) && s.roomFreshLocked(r) && r.Monitoring

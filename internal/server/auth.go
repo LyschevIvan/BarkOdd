@@ -149,7 +149,7 @@ func (s *Server) revokeSessionLocked(key string) {
 		return
 	}
 	delete(s.auth.sessions, key)
-	s.invalidateAuthLocked(key, "")
+	s.invalidateAccessLocked("", key, "")
 }
 func (s *Server) expireSessionsLocked() {
 	for key, sess := range s.auth.sessions {
@@ -602,7 +602,7 @@ func (s *Server) authAdminRoute(w http.ResponseWriter, r *http.Request) {
 	s.auth.users = users
 	if updated.Disabled {
 		s.revokeUserSessionsLocked(id)
-		s.invalidateAuthLocked("", id)
+		s.invalidateAccessLocked("", "", id)
 	}
 	writeJSON(w, 200, map[string]any{"user": &updated})
 }

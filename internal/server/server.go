@@ -22,7 +22,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 )
 
 const (
@@ -80,6 +79,8 @@ type storedEvent struct {
 
 type room struct {
 	OwnerID             string        `json:"ownerId"`
+	GroupID             string        `json:"groupId"`
+	SourceOwnerID       string        `json:"-"`
 	SourceAuthSession   string        `json:"-"`
 	OwnerApproved       bool          `json:"ownerApproved"`
 	ID                  string        `json:"id"`
@@ -114,6 +115,8 @@ type Server struct {
 	mu                sync.Mutex
 	config            Config
 	rooms             map[string]*room
+	groups            map[string]*group
+	deletedGroups     map[string][]string
 	closed            bool
 	stop              chan struct{}
 	stopped           chan struct{}
@@ -146,17 +149,21 @@ func New(config Config) (*Server, error) {
 	if err := os.MkdirAll(filepath.Join(config.DataDir, "photos"), 0700); err != nil {
 		return nil, err
 	}
-	s := &Server{config: config, rooms: make(map[string]*room), streams: make(map[*streamClient]struct{}), stop: make(chan struct{}), stopped: make(chan struct{})}
+	s := &Server{
+		config: config, rooms: make(map[string]*room), groups: make(map[string]*group),
+		deletedGroups: make(map[string][]string), streams: make(map[*streamClient]struct{}),
+		stop: make(chan struct{}), stopped: make(chan struct{}),
+	}
 	if err := s.initAuth(); err != nil {
+		return nil, err
+	}
+	if err := s.initGroups(); err != nil {
 		return nil, err
 	}
 	s.retryRoomDeletions()
 	files, err := filepath.Glob(filepath.Join(config.DataDir, "*.json"))
 	if err != nil {
 		return nil, err
-	}
-	if len(files) > maxRooms {
-		return nil, fmt.Errorf("storage contains more than %d rooms", maxRooms)
 	}
 	for _, file := range files {
 		fileInfo, err := os.Stat(file)
@@ -180,6 +187,14 @@ func New(config Config) (*Server, error) {
 		if filepath.Base(file) != r.ID+".json" {
 			return nil, errors.New("room filename does not match ID")
 		}
+		groupID := r.GroupID
+		if groupID == "" {
+			groupID = r.ID
+		}
+		if cameras, deleted := s.deletedGroups[groupID]; deleted {
+			s.deletedGroups[groupID] = append(cameras, r.ID)
+			continue
+		}
 		if r.Events == nil {
 			r.Events = []storedEvent{}
 		}
@@ -187,9 +202,19 @@ func New(config Config) (*Server, error) {
 		if r.PairingVersion == 0 {
 			r.PairingVersion = 1
 		}
+		if r.GroupID == "" {
+			if err := s.migrateLegacyCamera(&r); err != nil {
+				return nil, fmt.Errorf("migrate camera %s: %w", r.ID, err)
+			}
+		} else if s.groups[r.GroupID] == nil || s.groupUserLocked(r.OwnerID) == nil {
+			return nil, fmt.Errorf("camera %s references unknown group or creator", r.ID)
+		}
 		s.rooms[r.ID] = &r
 	}
-	if err = s.validateRoomOwners(); err != nil {
+	if len(s.rooms) > maxRooms {
+		return nil, fmt.Errorf("storage contains more than %d cameras", maxRooms)
+	}
+	if err = s.saveAuthUsersLocked(s.auth.users); err != nil {
 		return nil, err
 	}
 	if err = s.verifyPhotos(); err != nil {
@@ -236,6 +261,11 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "Сервер завершает работу")
 		return
 	}
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
+	if len(parts) >= 2 && parts[0] == "api" && parts[1] == "groups" {
+		s.handleGroupsLocked(w, r, parts)
+		return
+	}
 	if r.URL.Path == "/api/rooms" {
 		if r.Method != http.MethodPost && r.Method != http.MethodGet {
 			fail(w, 405, "Метод не поддерживается")
@@ -250,10 +280,9 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 			s.listRooms(w, user.ID)
 			return
 		}
-		s.createRoom(w, r, user.ID)
+		s.createRoom(w, r, user.ID, "")
 		return
 	}
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
 	if len(parts) < 3 || parts[0] != "api" || parts[1] != "rooms" || !storageID.MatchString(parts[2]) {
 		fail(w, 404, "Комната или адрес не найдены")
 		return
@@ -263,7 +292,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		fail(w, 404, "Комната не найдена")
 		return
 	}
-	role := s.authorizeLocked(r, room)
+	role, owner := s.authorizeLocked(r, room)
 	if role == "" {
 		fail(w, 401, "Неверный или отозванный ключ комнаты")
 		return
@@ -287,7 +316,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	case route == "settings" && r.Method == http.MethodPut:
 		s.updateSettings(w, r, room)
 	case route == "heartbeat" && r.Method == http.MethodPost:
-		s.heartbeat(w, r, room)
+		s.heartbeat(w, r, room, owner.ID)
 	case len(parts) == 6 && parts[3] == "events" && parts[5] == "photo" && r.Method == http.MethodGet:
 		s.getPhoto(w, r, room, parts[4])
 	case route == "pairing" && r.Method == http.MethodPost:
@@ -299,20 +328,17 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) createRoom(w http.ResponseWriter, r *http.Request, ownerID string) {
-	var body struct {
-		Name string `json:"name"`
-	}
-	if !readJSON(w, r, 4096, &body) {
-		return
-	}
-	body.Name = strings.TrimSpace(body.Name)
-	if !utf8.ValidString(body.Name) || utf8.RuneCountInString(body.Name) < 1 || utf8.RuneCountInString(body.Name) > 60 {
-		fail(w, 400, "Имя должно содержать от 1 до 60 символов")
+func (s *Server) createRoom(w http.ResponseWriter, r *http.Request, ownerID, groupID string) {
+	name, ok := readRoomName(w, r)
+	if !ok {
 		return
 	}
 	now := s.now()
 	if len(s.rooms) >= maxRooms {
+		fail(w, 429, "Достигнут лимит камер сервера")
+		return
+	}
+	if groupID == "" && len(s.groups) >= maxGroups {
 		fail(w, 429, "Достигнут лимит комнат сервера")
 		return
 	}
@@ -331,20 +357,38 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request, ownerID stri
 		fail(w, 500, "Не удалось создать ключ")
 		return
 	}
-	room := &room{OwnerID: ownerID, OwnerApproved: true, ID: id, Name: body.Name, CreatedAt: now, HostHash: tokenHash(host), ViewerHash: tokenHash(viewer), PairingVersion: 1, Settings: Settings{Threshold: defaultNoiseThreshold, QuietMS: 5000, SnapshotIntervalMS: 30000}, Events: []storedEvent{}}
+	var newGroup *group
+	if groupID == "" {
+		groupID = id
+		newGroup = &group{ID: groupID, Name: name, CreatedAt: now, MemberIDs: []string{ownerID}}
+		if err := s.saveGroup(newGroup); err != nil {
+			fail(w, 500, "Не удалось сохранить комнату")
+			return
+		}
+	}
+	room := &room{OwnerID: ownerID, GroupID: groupID, OwnerApproved: true, ID: id, Name: name, CreatedAt: now, HostHash: tokenHash(host), ViewerHash: tokenHash(viewer), PairingVersion: 1, Settings: Settings{Threshold: defaultNoiseThreshold, QuietMS: 5000, SnapshotIntervalMS: 30000}, Events: []storedEvent{}}
 	if err = s.save(room); err != nil {
+		if newGroup != nil {
+			path := s.groupPath(newGroup.ID, ".json")
+			if os.Remove(path) == nil {
+				syncDirectory(filepath.Dir(path))
+			}
+		}
 		fail(w, 500, "Не удалось сохранить комнату")
 		return
 	}
+	if newGroup != nil {
+		s.groups[newGroup.ID] = newGroup
+	}
 	s.rooms[id] = room
-	writeJSON(w, 201, map[string]string{"id": id, "ownerId": ownerID, "hostToken": host, "viewerToken": viewer})
+	writeJSON(w, 201, map[string]string{"id": id, "ownerId": ownerID, "hostToken": host, "viewerToken": viewer, "groupId": groupID})
 }
 
 func (s *Server) roomState(w http.ResponseWriter, r *room) {
 	if !s.prune(w, r) {
 		return
 	}
-	online := r.LastSeenAt != nil && s.now().Sub(*r.LastSeenAt) < 15*time.Second
+	online := s.roomFreshLocked(r)
 	events := make([]Event, len(r.Events))
 	for i, v := range r.Events {
 		events[i] = v.Event
@@ -354,7 +398,7 @@ func (s *Server) roomState(w http.ResponseWriter, r *room) {
 	if r.SessionID != "" {
 		session = r.SessionID
 	}
-	writeJSON(w, 200, map[string]any{"turnAuthorizationRequired": s.config.MediaTransport == "webrtc" && len(s.config.TURNURLs) > 0 && !r.OwnerApproved, "mediaTransport": s.config.MediaTransport, "id": r.ID, "name": r.Name, "createdAt": r.CreatedAt, "lastSeenAt": r.LastSeenAt, "online": online, "monitoring": online && r.Monitoring, "sessionId": session, "pairingVersion": r.PairingVersion, "lastNoiseAt": r.LastNoiseAt, "settings": r.Settings, "eventCount": len(events), "events": events})
+	writeJSON(w, 200, map[string]any{"turnAuthorizationRequired": s.config.MediaTransport == "webrtc" && len(s.config.TURNURLs) > 0 && !r.OwnerApproved, "mediaTransport": s.config.MediaTransport, "id": r.ID, "name": r.Name, "groupId": r.GroupID, "groupName": s.groups[r.GroupID].Name, "createdAt": r.CreatedAt, "lastSeenAt": r.LastSeenAt, "online": online, "monitoring": online && r.Monitoring, "sessionId": session, "pairingVersion": r.PairingVersion, "lastNoiseAt": r.LastNoiseAt, "settings": r.Settings, "eventCount": len(events), "events": events})
 }
 
 func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request, current *room) {
@@ -380,7 +424,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request, current 
 	writeJSON(w, 200, current.Settings)
 }
 
-func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request, current *room) {
+func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request, current *room, ownerID string) {
 	var body struct {
 		Monitoring *bool  `json:"monitoring"`
 		SessionID  string `json:"sessionId"`
@@ -401,6 +445,10 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request, current *room
 	// delayed start nor a delayed stop may replace or refresh the current session.
 	if slices.Contains(current.RetiredSessions, body.SessionID) {
 		writeHeartbeat(w, current)
+		return
+	}
+	if body.SessionID == current.SessionID && current.SourceOwnerID != ownerID {
+		fail(w, 403, "Сессия камеры принадлежит другому хозяину")
 		return
 	}
 	updated := *current
@@ -444,6 +492,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request, current *room
 	updated.LastSeenAt = &now
 	updated.Monitoring = *body.Monitoring
 	updated.SessionID = body.SessionID
+	updated.SourceOwnerID = ownerID
 	updated.SourceAuthSession = s.sessionKey(r)
 	if newStart || body.Stopped {
 		if err := s.save(&updated); err != nil {
@@ -497,25 +546,22 @@ func (s *Server) pairing(w http.ResponseWriter, current *room) {
 	writeJSON(w, 200, map[string]string{"viewerToken": token})
 }
 
-func (s *Server) authorizeLocked(r *http.Request, room *room) string {
-	if !s.ownerEnabledLocked(room.OwnerID) {
-		return ""
-	}
+func (s *Server) authorizeLocked(r *http.Request, room *room) (string, *authUser) {
 	raw := r.Header.Get("Authorization")
 	if len(r.Header.Values("Authorization")) == 0 {
-		if user := s.principalLocked(r); user != nil && user.ID == room.OwnerID {
-			return "host"
+		if user := s.principalLocked(r); user != nil && s.groupMemberLocked(s.groups[room.GroupID], user.ID) {
+			return "host", user
 		}
-		return ""
+		return "", nil
 	}
-	if !strings.HasPrefix(raw, "Bearer ") || len(raw) > 128 {
-		return ""
+	if !s.guestCameraAllowedLocked(room) || !strings.HasPrefix(raw, "Bearer ") || len(raw) > 128 {
+		return "", nil
 	}
 	hash := tokenHash(strings.TrimPrefix(raw, "Bearer "))
 	if subtle.ConstantTimeCompare([]byte(hash), []byte(room.ViewerHash)) == 1 {
-		return "viewer"
+		return "viewer", nil
 	}
-	return ""
+	return "", nil
 }
 func randomID(n int) (string, error) {
 	b := make([]byte, n)

@@ -89,24 +89,6 @@ func (s *Server) saveAuthUsersLocked(users map[string]*authUser) error {
 	}
 	return atomicWrite(filepath.Join(s.config.DataDir, "auth", "users.json"), data)
 }
-func (s *Server) validateRoomOwners() error {
-	for _, r := range s.rooms {
-		if r.OwnerID == "" {
-			updated := *r
-			updated.OwnerID = authOwnerID
-			if err := s.save(&updated); err != nil {
-				return fmt.Errorf("migrate room owner: %w", err)
-			}
-			*r = updated
-		}
-		if r.OwnerID != authOwnerID {
-			if s.config.AuthMode != "multi_user" || s.auth.users[r.OwnerID] == nil {
-				return errors.New("room references unknown or incompatible owner")
-			}
-		}
-	}
-	return s.saveAuthUsersLocked(s.auth.users)
-}
 func cloneAuthUsers(users map[string]*authUser) map[string]*authUser {
 	out := make(map[string]*authUser, len(users))
 	for id, u := range users {
