@@ -632,8 +632,13 @@ async function loadDevices() {
     for (const [kind, id, label] of [['videoinput', 'video-device', 'Камера'], ['audioinput', 'audio-device', 'Микрофон']]) {
       const select = $(id);
       const selected = select.value;
-      select.replaceChildren(new Option(`${label} по умолчанию`, ''));
-      devices.filter((device) => device.kind === kind && device.deviceId).forEach((device, index) => select.add(new Option(device.label || `${label} ${index + 1}`, device.deviceId)));
+      // Keep direction choices available even when the browser hides cameras.
+      select.querySelectorAll('option[data-device]').forEach(option => option.remove());
+      devices.filter((device) => device.kind === kind && device.deviceId).forEach((device, index) => {
+        const option = new Option(device.label || `${label} ${index + 1}`, device.deviceId);
+        option.dataset.device = '';
+        select.add(option);
+      });
       if ([...select.options].some((option) => option.value === selected)) select.value = selected;
     }
   } catch (_) { /* The browser may hide devices until capture is allowed. */ }
@@ -788,7 +793,13 @@ async function toggleCapture() {
       if (hostRunning) { await currentMonitor.stopHost(); if (generation === current) hostRunning = false; }
       else {
         if (!window.isSecureContext) throw new Error('Камера доступна только по HTTPS или на localhost. Откройте BarkOdd по защищённому адресу.');
-        await currentMonitor.startHost({ videoDeviceId: $('video-device').value || undefined, audioDeviceId: $('audio-device').value || undefined, settings: room ? room.settings : DEFAULT_SETTINGS });
+        const videoFacingMode = $('video-device').selectedOptions[0]?.dataset.facingMode;
+        await currentMonitor.startHost({
+          videoDeviceId: videoFacingMode ? undefined : $('video-device').value || undefined,
+          videoFacingMode,
+          audioDeviceId: $('audio-device').value || undefined,
+          settings: room ? room.settings : DEFAULT_SETTINGS,
+        });
         if (generation === current) hostRunning = true;
       }
     }

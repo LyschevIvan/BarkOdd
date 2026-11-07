@@ -502,7 +502,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     return explanations[error?.name] ? new Error(explanations[error.name]) : error;
   }
 
-  async function startHost({ videoDeviceId, audioDeviceId, settings } = {}) {
+  async function startHost({ videoDeviceId, videoFacingMode, audioDeviceId, settings } = {}) {
     if (destroyed) throw new Error('Наблюдение уже закрыто');
     if (host?.active) return;
     const state = session();
@@ -517,8 +517,10 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
       if (!globalThis.WebSocket) throw new Error('Этот браузер не поддерживает видеотрансляцию через WebSocket.');
       const Audio = globalThis.AudioContext || globalThis.webkitAudioContext;
       if (!Audio) throw new Error('Этот браузер не поддерживает обработку звука.');
+      const camera = videoDeviceId ? { deviceId: { exact: videoDeviceId } }
+        : videoFacingMode ? { facingMode: { exact: videoFacingMode } } : {};
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, ...(videoDeviceId ? { deviceId: { exact: videoDeviceId } } : {}) },
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, ...camera },
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, ...(audioDeviceId ? { deviceId: { exact: audioDeviceId } } : {}) },
       });
       if (!state.active) { stream.getTracks().forEach(track => track.stop()); return; }

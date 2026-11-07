@@ -199,6 +199,66 @@ test('protected creation requires a session and never persists the code', async 
   expect(page.url()).not.toContain(key);
 });
 
+test('camera direction can be selected when only the front device is listed', async ({ page, browserName }) => {
+  test.skip(browserName !== 'chromium', 'This test uses Chromium’s fake camera and microphone.');
+  await page.addInitScript(() => {
+    const devices = navigator.mediaDevices;
+    const getUserMedia = devices.getUserMedia.bind(devices);
+    window.__videoRequests = [];
+    devices.enumerateDevices = async () => [
+      { kind: 'videoinput', deviceId: 'tablet-front', label: window.__videoRequests.length ? 'Tablet front camera' : '' },
+      { kind: 'audioinput', deviceId: 'tablet-mic', label: 'Tablet microphone' },
+    ];
+    devices.getUserMedia = constraints => {
+      window.__videoRequests.push(constraints.video);
+      // The fake camera has neither the tablet's ID nor a physical orientation.
+      const video = { ...constraints.video };
+      delete video.deviceId;
+      delete video.facingMode;
+      return getUserMedia({ ...constraints, video });
+    };
+  });
+
+  await loginOwner(page);
+  await page.locator('#choose-host').click();
+  await page.locator('#room-name').fill('Tablet camera selection');
+  await page.locator('#host-form button[type=submit]').click();
+
+  const camera = page.locator('#video-device');
+  const capture = page.locator('#capture-button');
+  const preview = page.locator('#camera-video');
+  const frontDevice = camera.locator('option[value="tablet-front"]');
+  await expect(frontDevice).toHaveText('Камера 1');
+  await expect(camera).toHaveValue('');
+  await expect(camera.locator('option[value="facing:user"]')).toHaveText('Фронтальная камера');
+  await expect(camera.locator('option[value="facing:environment"]')).toHaveText('Задняя камера');
+  await camera.selectOption('facing:user');
+  await camera.selectOption('facing:environment');
+  expect(await page.evaluate(() => window.__videoRequests)).toEqual([]);
+
+  await capture.click();
+  await expect(preview).toBeVisible();
+  await expect(frontDevice).toHaveText('Tablet front camera');
+  const [rearRequest] = await page.evaluate(() => window.__videoRequests);
+  expect(rearRequest.facingMode).toEqual({ exact: 'environment' });
+  expect(rearRequest).not.toHaveProperty('deviceId');
+  await expect(camera).toHaveValue('facing:environment');
+  await preview.evaluate(video => { window.__rearCaptureTracks = video.srcObject.getTracks(); });
+
+  await capture.click();
+  await expect(camera).toBeEnabled();
+  await expect(camera).toHaveValue('facing:environment');
+  expect(await page.evaluate(() => window.__rearCaptureTracks.every(track => track.readyState === 'ended'))).toBe(true);
+
+  await camera.selectOption('tablet-front');
+  await capture.click();
+  await expect(preview).toBeVisible();
+  const [, frontRequest] = await page.evaluate(() => window.__videoRequests);
+  expect(frontRequest.deviceId).toEqual({ exact: 'tablet-front' });
+  expect(frontRequest).not.toHaveProperty('facingMode');
+  await capture.click();
+});
+
 test('replacing the source stops the previous camera and keeps its room binding', async ({ page, context }) => {
   await instrument(page);
   await loginOwner(page);

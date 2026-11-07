@@ -41,6 +41,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
   const audioStatuses = [];
   const playbacks = [];
   const worklets = [];
+  const mediaConstraints = [];
   let mediaRequests = 0;
   let pendingMedia;
   let pendingWake;
@@ -102,7 +103,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
   replace('clearTimeout', id => timers.delete(id));
   replace('performance', { now: () => time });
   replace('navigator', {
-    mediaDevices: { getUserMedia: () => { mediaRequests++; return deferredMedia ? new Promise(resolve => { pendingMedia = resolve; }) : Promise.resolve(stream); } },
+    mediaDevices: { getUserMedia: constraints => { mediaRequests++; mediaConstraints.push(constraints); return deferredMedia ? new Promise(resolve => { pendingMedia = resolve; }) : Promise.resolve(stream); } },
     wakeLock: { request: () => deferredWake ? new Promise(resolve => { pendingWake = resolve; }) : Promise.resolve(wakeLock) },
   });
   replace('AudioContext', AudioContext);
@@ -186,7 +187,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     await settle();
   };
   return {
-    monitor, levels, posts, errors, statuses, frames, sockets, encodes, canvases, peers, localStreams, transports, remoteStreams, stream, advance, settle, audioStatuses, playbacks, worklets,
+    monitor, levels, posts, errors, statuses, frames, sockets, encodes, canvases, peers, localStreams, transports, remoteStreams, stream, advance, settle, audioStatuses, playbacks, worklets, mediaConstraints,
     mediaRequests: () => mediaRequests,
     openSocket(role) {
       assert.ok(sockets.length > 0, 'monitor must connect to the WebSocket endpoint');
@@ -235,6 +236,24 @@ async function test(name, options, run) {
     console.error(`not ok - ${name}\n${error.stack}`);
   } finally { await env.cleanup(); }
 }
+
+for (const mode of ['environment', 'user']) {
+  await test(`host can request the ${mode} camera without an enumerated device ID`, {}, async env => {
+    await env.monitor.startHost({ videoFacingMode: mode, audioDeviceId: 'selected-microphone' });
+    const { video, audio } = env.mediaConstraints[0];
+    assert.deepEqual(video.facingMode, { exact: mode });
+    assert.equal(video.deviceId, undefined, 'facing selection must not be restricted to the default camera ID');
+    assert.deepEqual(audio.deviceId, { exact: 'selected-microphone' });
+    assert.equal(env.localStreams[0], env.stream);
+  });
+}
+
+await test('explicit camera ID takes precedence over facing preference', {}, async env => {
+  await env.monitor.startHost({ videoDeviceId: 'external-camera', videoFacingMode: 'environment' });
+  const { video } = env.mediaConstraints[0];
+  assert.deepEqual(video.deviceId, { exact: 'external-camera' });
+  assert.equal(video.facingMode, undefined, 'a selected USB camera need not report a facing mode');
+});
 
 await test('raising sensitivity detects quiet input live and preserves the measured event level', { audioLevel: 0.002 }, async env => {
   await env.monitor.startHost({ settings: { threshold: 0.003 } });
