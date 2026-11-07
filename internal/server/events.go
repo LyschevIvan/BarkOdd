@@ -21,23 +21,25 @@ const (
 )
 
 type eventPayload struct {
-	SessionID  string     `json:"sessionId"`
-	EpisodeID  string     `json:"episodeId"`
-	Level      *float64   `json:"level"`
-	Photo      string     `json:"photo"`
-	DetectedAt *time.Time `json:"detectedAt"`
-	PhotoAt    *time.Time `json:"photoAt"`
-	detectedAt time.Time
-	photoAt    time.Time
+	SessionID      string     `json:"sessionId"`
+	EpisodeID      string     `json:"episodeId"`
+	Level          *float64   `json:"level"`
+	Photo          string     `json:"photo"`
+	DetectedAt     *time.Time `json:"detectedAt"`
+	PhotoAt        *time.Time `json:"photoAt"`
+	HistoryVersion *uint64    `json:"historyVersion"`
+	detectedAt     time.Time
+	photoAt        time.Time
 }
 
 // A reservation bounds work while the shared room mutex remains available to
 // heartbeats and live video. Its original room also identifies deletion races.
 type eventReservation struct {
-	server      *Server
-	current     *room
-	decodePhoto bool
-	released    bool
+	server         *Server
+	current        *room
+	decodePhoto    bool
+	released       bool
+	historyVersion uint64
 }
 
 func (s *Server) serveEvent(w http.ResponseWriter, r *http.Request, roomID string) {
@@ -148,8 +150,12 @@ func (s *Server) reserveEvent(w http.ResponseWriter, r *http.Request, roomID str
 		fail(w, 403, "Сессия камеры завершена или заменена")
 		return nil
 	}
+	if clearedNoise(current, body) {
+		discardEvent(w, current)
+		return nil
+	}
 	now := s.now()
-	decodePhoto := body.Photo != "" && eventPhotoDue(current, body, now)
+	decodePhoto := body.Photo != "" && !clearedPhoto(current, body) && eventPhotoDue(current, body, now)
 	if current.eventBusy || (decodePhoto && s.eventPhotoDecodes >= maxEventPhotoDecodes) {
 		fail(w, 429, "Обработка событий занята; повторите запрос позже")
 		return nil
@@ -170,7 +176,7 @@ func (s *Server) reserveEvent(w http.ResponseWriter, r *http.Request, roomID str
 	if decodePhoto {
 		s.eventPhotoDecodes++
 	}
-	return &eventReservation{server: s, current: current, decodePhoto: decodePhoto}
+	return &eventReservation{server: s, current: current, decodePhoto: decodePhoto, historyVersion: current.HistoryVersion}
 }
 
 func eventPhotoDue(current *room, body *eventPayload, now time.Time) bool {
@@ -224,6 +230,11 @@ func (s *Server) commitEvent(w http.ResponseWriter, r *http.Request, reservation
 		fail(w, 403, "Сессия камеры завершена или заменена")
 		return
 	}
+	if current.HistoryVersion != reservation.historyVersion || clearedNoise(current, body) {
+		discardEvent(w, current)
+		return
+	}
+	photoDiscarded := clearedPhoto(current, body)
 	now := s.now()
 	detectedAt, photoAt := body.detectedAt, body.photoAt
 	updated, removed, _ := compact(current, now)
@@ -255,7 +266,7 @@ func (s *Server) commitEvent(w http.ResponseWriter, r *http.Request, reservation
 		updated.LastNoiseAt = &detectedAt
 	}
 	newPhoto := ""
-	if len(picture) > 0 && (event.PhotoAt == nil || photoAt.After(*event.PhotoAt)) && (updated.LastPhotoAt == nil || now.Sub(*updated.LastPhotoAt) >= time.Duration(updated.Settings.SnapshotIntervalMS)*time.Millisecond) {
+	if len(picture) > 0 && !photoDiscarded && (event.PhotoAt == nil || photoAt.After(*event.PhotoAt)) && (updated.LastPhotoAt == nil || now.Sub(*updated.LastPhotoAt) >= time.Duration(updated.Settings.SnapshotIntervalMS)*time.Millisecond) {
 		id, err := randomID(12)
 		if err != nil {
 			fail(w, 500, "Не удалось сохранить фотографию")
@@ -286,7 +297,11 @@ func (s *Server) commitEvent(w http.ResponseWriter, r *http.Request, reservation
 	}
 	*current = updated
 	s.removePhotos(removed)
-	writeJSON(w, 200, result)
+	writeJSON(w, 200, struct {
+		Event
+		PhotoDiscarded bool   `json:"photoDiscarded,omitempty"`
+		HistoryVersion uint64 `json:"historyVersion"`
+	}{result, photoDiscarded, current.HistoryVersion})
 }
 
 func (s *Server) getPhoto(w http.ResponseWriter, r *http.Request, current *room, eventID string) {

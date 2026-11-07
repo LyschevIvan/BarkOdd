@@ -164,10 +164,25 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     status('offline', 'Нет связи с сервером. Камера и обнаружение звука продолжают работать.');
   }
 
+  function applyHistoryVersion(state, version, initialHeartbeat = false) {
+    if (!Number.isSafeInteger(version) || version < 0) return;
+    if (state.historyVersion !== undefined && version <= state.historyVersion) return;
+    // Samples captured before the first healthy heartbeat belong to the new session.
+    // Every subsequent history version invalidates all queued noise and photos.
+    if (initialHeartbeat) {
+      for (const payload of state.events.values()) payload.historyVersion = version;
+    } else state.events.clear();
+    state.historyVersion = version;
+  }
+
   async function refreshHost(state) {
     const monitoring = healthySource(state);
-    await request(state, 'post', '/heartbeat', { monitoring, sessionId: state.sessionId });
+    const saved = await request(state, 'post', '/heartbeat', { monitoring, sessionId: state.sessionId });
     if (!state.active) return;
+    if (monitoring || state.sessionEstablished) {
+      applyHistoryVersion(state, saved?.historyVersion, monitoring && !state.sessionEstablished);
+    }
+    if (monitoring) state.sessionEstablished = true;
     // Restarts forget server-side session state, and a pause heartbeat cannot
     // establish a replacement session. Authenticate only after a healthy
     // heartbeat; an already connected socket may remain during a pause.
@@ -454,6 +469,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
           } catch (error) { report(error); }
         }
         const payload = { sessionId: state.sessionId, episodeId: event.episodeId, level, detectedAt: new Date().toISOString() };
+        if (state.historyVersion !== undefined) payload.historyVersion = state.historyVersion;
         if (photo) { payload.photo = photo; payload.photoAt = photoAt; }
         state.events.set(event.episodeId, payload);
         if (state.events.size > 12) state.events.delete(state.events.keys().next().value);
@@ -476,7 +492,10 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     }
     const saved = await request(state, 'post', '/events', payload);
     if (!state.active) return;
-    if (payload.photo) {
+    applyHistoryVersion(state, saved?.historyVersion);
+    if (state.historyVersion !== undefined && payload.historyVersion !== state.historyVersion) return;
+    // Clearing history consumes the outdated upload without confirming its photo.
+    if (payload.photo && !saved?.discarded && !saved?.photoDiscarded) {
       // A successful noise update can still skip its photo during server cooldown.
       // Keep that JPEG queued until the returned event confirms its timestamp.
       if (!(Date.parse(saved?.photoAt) >= Date.parse(payload.photoAt))) return;
@@ -672,5 +691,9 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     errors.clear();
   }
 
-  return { startHost, stopHost, startViewer, stopViewer, resumeAudio, updateSettings, destroy };
+  function updateHistoryVersion(version) {
+    if (host?.active) applyHistoryVersion(host, version);
+  }
+
+  return { startHost, stopHost, startViewer, stopViewer, resumeAudio, updateSettings, updateHistoryVersion, destroy };
 }

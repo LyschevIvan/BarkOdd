@@ -62,6 +62,132 @@ const roomURL = (base, id, route = '') => new URL(`api/rooms/${id}${route}`, bas
 
 const frameProgress = page => rtc ? page.locator(liveSelector).evaluate(video => video.getVideoPlaybackQuality().totalVideoFrames) : page.locator(liveSelector).getAttribute('src');
 
+test('history clear keeps monitoring, new starts reset history, and the latest photo leads on mobile', async ({ browser, page, baseURL }) => {
+  await loginOwner(page);
+  await page.locator('#choose-host').click();
+  await page.locator('#room-name').fill('History lifecycle');
+  await page.locator('#host-form button[type=submit]').click();
+  await expect(page.locator('#dashboard')).toBeVisible();
+  const binding = await savedHost(page);
+  const headers = { Origin: new URL(baseURL).origin };
+  const state = async () => (await page.request.get(roomURL(baseURL, binding.id))).json();
+  // Keep the synthetic microphone below the threshold; seed real API events so
+  // clearing is observable without another sound immediately filling the list.
+  expect((await page.request.put(roomURL(baseURL, binding.id, '/settings'), { headers, data: { threshold: 0.5, snapshotIntervalMs: 10000 } })).status()).toBe(200);
+  await page.reload();
+  await page.locator('#capture-button').click();
+  await expect(page.locator('#capture-button')).toHaveText('Остановить наблюдение');
+  const picture = await page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 32;
+    canvas.getContext('2d').fillRect(0, 0, 32, 32);
+    return canvas.toDataURL('image/jpeg');
+  });
+  const seed = async (episodeId, photo = undefined) => {
+    const sessionId = (await state()).sessionId;
+    const response = await page.request.post(roomURL(baseURL, binding.id, '/events'), { headers, data: { sessionId, episodeId, level: 0.8, photo, detectedAt: new Date().toISOString(), ...(photo ? { photoAt: new Date().toISOString() } : {}) } });
+    expect(response.status()).toBe(200);
+    return response.json();
+  };
+  const first = await seed('first', picture);
+  await expect(page.locator('#latest-photo')).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => page.evaluate(() => document.querySelector('#latest-photo-panel').getBoundingClientRect().bottom <= document.querySelector('.video-card').getBoundingClientRect().top)).toBe(true);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: 'test-results/history-mobile.png', fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await expect.poll(() => page.evaluate(() => document.querySelector('#latest-photo-panel').getBoundingClientRect().x > document.querySelector('.video-card').getBoundingClientRect().x)).toBe(true);
+
+  const guestContext = await browser.newContext();
+  const guest = await guestContext.newPage();
+  try {
+    await guest.goto(new URL(`?role=viewer#room=${binding.id}&key=${binding.viewerToken}`, baseURL).href);
+    await expect(guest.locator('#latest-photo')).toBeVisible();
+    await expect(guest.locator('#clear-history')).toBeHidden();
+    await guest.locator('#latest-photo-button').click();
+    await expect(guest.locator('#photo-dialog')).toBeVisible();
+
+    page.once('dialog', dialog => dialog.dismiss());
+    await page.locator('#clear-history').click();
+    expect((await state()).events).toHaveLength(1);
+    const clearRoute = roomURL(baseURL, binding.id, '/events');
+    await page.route(clearRoute, route => route.request().method() === 'DELETE' ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'Проверка ошибки очистки' }) }) : route.continue());
+    page.once('dialog', dialog => dialog.accept());
+    await page.locator('#clear-history').click();
+    await expect(page.locator('#dashboard-alert')).toContainText('Проверка ошибки очистки');
+    await expect(page.locator('.event-card')).toHaveCount(1);
+    await page.unroute(clearRoute);
+
+    // Hold a state response read before clear. It must not resurrect old cards
+    // when it eventually arrives after the successful DELETE.
+    let releaseOldState;
+    let held = false;
+    const heldResponse = new Promise(resolve => { releaseOldState = resolve; });
+    await page.route(roomURL(baseURL, binding.id), async route => {
+      if (held) { await route.continue(); return; }
+      const response = await route.fetch();
+      held = true;
+      await heldResponse;
+      await route.fulfill({ response });
+    });
+    await expect.poll(() => held).toBe(true);
+    page.once('dialog', dialog => dialog.accept());
+    await page.locator('#clear-history').click();
+    await expect(page.locator('#history-empty')).toBeVisible();
+    releaseOldState();
+    await expect(page.locator('#event-count')).toHaveText('0');
+    await expect(page.locator('#latest-photo-panel')).toBeHidden();
+    await expect(page.locator('#capture-button')).toHaveText('Остановить наблюдение');
+    await expect(guest.locator('#history-empty')).toBeVisible();
+    await expect(guest.locator('#photo-dialog')).not.toBeVisible();
+    expect((await page.request.get(roomURL(baseURL, binding.id, `/events/${first.id}/photo`))).status()).toBe(404);
+    await page.unroute(roomURL(baseURL, binding.id));
+
+    await seed('after-clear');
+    await expect(page.locator('.event-card')).toHaveCount(1);
+    await page.locator('#capture-button').click();
+    await expect(page.locator('#capture-button')).toHaveText('Включить наблюдение');
+    expect((await state()).events).toHaveLength(1);
+    await page.locator('#capture-button').click();
+    await expect(page.locator('#history-empty')).toBeVisible();
+    expect((await state()).events).toHaveLength(0);
+    await page.locator('#capture-button').click();
+  } finally { await guestContext.close(); }
+});
+
+test('opening a photo survives a history update while the photo is loading', async ({ browser, page, baseURL }) => {
+  await loginOwner(page);
+  const headers = { Origin: new URL(baseURL).origin };
+  const created = await page.request.post(new URL('api/rooms', baseURL).href, { headers, data: { name: 'Loading history photo' } });
+  expect(created.status()).toBe(201);
+  const binding = await created.json();
+  const sessionId = 'loading-photo-session';
+  expect((await page.request.post(roomURL(baseURL, binding.id, '/heartbeat'), { headers, data: { sessionId, monitoring: true } })).status()).toBe(200);
+  const photo = await page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 16;
+    return canvas.toDataURL('image/jpeg');
+  });
+  expect((await page.request.post(roomURL(baseURL, binding.id, '/events'), { headers, data: { sessionId, episodeId: 'photo', photo, level: 0.3 } })).status()).toBe(200);
+  const context = await browser.newContext();
+  let releasePhoto;
+  const photoReady = new Promise(resolve => { releasePhoto = resolve; });
+  try {
+    const viewer = await context.newPage();
+    await viewer.route('**/events/*/photo', async route => {
+      const response = await route.fetch();
+      await photoReady;
+      await route.fulfill({ response });
+    });
+    await viewer.goto(new URL(`?role=viewer#room=${binding.id}&key=${binding.viewerToken}`, baseURL).href);
+    await viewer.locator('#latest-photo-button').click();
+    expect((await page.request.post(roomURL(baseURL, binding.id, '/events'), { headers, data: { sessionId, episodeId: 'later-noise', level: 0.3 } })).status()).toBe(200);
+    await expect(viewer.locator('#event-count')).toHaveText('2');
+    releasePhoto();
+    await expect(viewer.locator('#photo-dialog')).toBeVisible();
+  } finally { releasePhoto(); await context.close(); }
+});
+
 test('noise bursts within the photo interval update one photographed history event', async ({ page, baseURL }) => {
   await loginOwner(page);
   await page.locator('#choose-host').click();
@@ -182,6 +308,8 @@ test(`${transport}: on-demand video, photos, pause, reconnect and revocation`, a
   await expectFrame(viewer);
 
   // One failed photo response retries even with stopped source and unchanged history.
+  // A new source start now clears the preceding session's photos.
+  await expect.poll(async () => (await state()).events.some(event => event.hasPhoto)).toBe(true);
   await page.locator('#capture-button').click();
   let aborted = false;
   await viewer.route('**/events/*/photo', route => { if (!aborted) { aborted = true; return route.abort(); } return route.continue(); });

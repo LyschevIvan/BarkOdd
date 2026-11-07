@@ -36,6 +36,14 @@ func validateStored(r *room) error {
 	if len(r.Events) > maxEvents {
 		return errors.New("too many persisted events")
 	}
+	if (r.HistorySessionID != "" && !identifier.MatchString(r.HistorySessionID)) || (r.HistoryClearedAt != nil && r.HistoryClearedAt.IsZero()) || len(r.RetiredSessions) > 128 {
+		return errors.New("invalid history session metadata")
+	}
+	for _, session := range r.RetiredSessions {
+		if !identifier.MatchString(session) {
+			return errors.New("invalid retired session")
+		}
+	}
 	ids := map[string]bool{}
 	episodes := map[string]bool{}
 	for _, e := range r.Events {
@@ -176,14 +184,14 @@ func (s *Server) sweep() error {
 	now := s.now()
 	for _, current := range s.rooms {
 		updated, removed, changed := compact(current, now)
-		if !changed {
-			continue
+		if changed {
+			if err := s.save(&updated); err != nil {
+				return fmt.Errorf("prune room %s: %w", current.ID, err)
+			}
+			*current = updated
+			s.removePhotos(removed)
 		}
-		if err := s.save(&updated); err != nil {
-			return fmt.Errorf("prune room %s: %w", current.ID, err)
-		}
-		*current = updated
-		s.removePhotos(removed)
+		s.retryHistoryCleanup(current)
 	}
 	return nil
 }

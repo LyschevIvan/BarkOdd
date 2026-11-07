@@ -21,6 +21,7 @@ let room = null;
 let generation = 0;
 let navigationSequence = 0;
 let pollTimer = null;
+let roomPollSequence = 0;
 let clockTimer = null;
 let qrURL = null;
 let toastTimer = null;
@@ -34,11 +35,13 @@ let mediaMessage = '';
 let serverReachable = true;
 let historySignature = '';
 let historyLimit = 12;
+let clearingHistory = false;
 let settingsLoaded = false;
 let settingsDirty = false;
 let sensitivityDirty = false;
 let latestPhoto = null;
 let photoEpoch = 0;
+let dialogPhotoKey = null;
 let liveFrameURL = null;
 let liveFrameTimer = null;
 let pendingLiveFrame = null;
@@ -209,6 +212,7 @@ function roomAPI(binding, role) {
     get: (path = '') => call(path),
     post: (path, body) => call(path, { method: 'POST', body }),
     put: (path, body) => call(path, { method: 'PUT', body }),
+    delete: (path) => call(path, { method: 'DELETE' }),
     blob: (path, body) => call(path, { method: body === undefined ? 'GET' : 'POST', body, blob: true }),
   };
 }
@@ -317,6 +321,7 @@ function pairingLink() {
 
 async function releaseRoom() {
   generation += 1;
+  roomPollSequence += 1;
   photoEpoch += 1;
   clearTimeout(pollTimer);
   clearInterval(clockTimer);
@@ -335,6 +340,7 @@ async function releaseRoom() {
   clearLiveFrame();
   $('photo-dialog').close();
   $('dialog-photo').removeAttribute('src');
+  dialogPhotoKey = null;
   for (const entry of photoCache.values()) if (entry.url) URL.revokeObjectURL(entry.url);
   photoCache.clear();
   if (qrURL) URL.revokeObjectURL(qrURL);
@@ -352,6 +358,7 @@ async function releaseRoom() {
   mediaMessage = '';
   historySignature = '';
   historyLimit = 12;
+  clearingHistory = false;
   settingsLoaded = false;
   settingsDirty = false;
   sensitivityDirty = false;
@@ -428,6 +435,8 @@ async function openRoom(role, binding, actor = authActor()) {
   $('event-history').replaceChildren();
   $('history-empty').hidden = false;
   $('event-count').textContent = '0';
+  $('clear-history').hidden = !binding.account;
+  $('clear-history').disabled = true;
   $('last-noise-value').textContent = 'Пока не было';
   $('last-noise-detail').textContent = 'Здесь появится время события';
   $('settings-feedback').textContent = '';
@@ -502,9 +511,11 @@ async function openRoom(role, binding, actor = authActor()) {
 
 async function pollRoom(current) {
   if (current !== generation || !api) return;
+  clearTimeout(pollTimer);
+  const sequence = ++roomPollSequence;
   try {
     const state = await api.get('');
-    if (current !== generation) return;
+    if (current !== generation || sequence !== roomPollSequence) return;
     const wasOffline = !serverReachable;
     serverReachable = true;
     room = state;
@@ -522,14 +533,14 @@ async function pollRoom(current) {
     renderHistory();
     renderMedia();
   } catch (error) {
-    if (current !== generation) return;
+    if (current !== generation || sequence !== roomPollSequence) return;
     if ([401, 403, 404].includes(error.status)) { await invalidateSession(error); return; }
     serverReachable = false;
     renderStatus();
     renderMedia();
     showError('Нет связи с сервером. Показаны последние полученные данные; пробуем подключиться снова.');
   } finally {
-    if (current === generation && active) pollTimer = setTimeout(() => void pollRoom(current), 2000);
+    if (current === generation && sequence === roomPollSequence && active) pollTimer = setTimeout(() => void pollRoom(current), 2000);
   }
 }
 
@@ -550,6 +561,38 @@ function renderTimes() {
   $('last-noise-value').textContent = relativeTime(room.lastNoiseAt);
   $('last-noise-detail').textContent = room.lastNoiseAt ? fullDate(room.lastNoiseAt) : 'Здесь появится время события';
   $('event-count').textContent = String(room.eventCount || (room.events || []).length);
+  $('clear-history').disabled = clearingHistory || !(room.events?.length || room.lastNoiseAt);
+  $('clear-history').textContent = clearingHistory ? 'Очищаем…' : 'Очистить историю';
+}
+
+async function clearHistory() {
+  if (!active?.binding.account || !api || clearingHistory) return;
+  if (!window.confirm('Очистить все шумные моменты и фотографии этой комнаты? Наблюдение продолжится. Это действие нельзя отменить.')) return;
+  const current = generation;
+  const currentAPI = api;
+  clearingHistory = true;
+  roomPollSequence += 1;
+  clearTimeout(pollTimer);
+  renderTimes();
+  showError('');
+  try {
+    const result = await currentAPI.delete('/events');
+    if (current !== generation) return;
+    monitor?.updateHistoryVersion(result.historyVersion);
+    room = { ...room, events: [], eventCount: 0, lastNoiseAt: null };
+    historyLimit = 12;
+    historySignature = '';
+    renderHistory();
+    toast(result.cleanupPending ? 'История очищена. Сервер завершит удаление фотографий.' : 'История и фотографии очищены');
+  } catch (error) {
+    if (current === generation) showError(error.message);
+  } finally {
+    if (current === generation) {
+      clearingHistory = false;
+      renderTimes();
+      void pollRoom(current);
+    }
+  }
 }
 
 function renderMedia() {
@@ -589,7 +632,7 @@ function renderMedia() {
   $('device-hint').textContent = hostRunning ? `${microphoneLabel ? `Микрофон: ${microphoneLabel}. ` : ''}Чтобы сменить камеру или микрофон, остановите наблюдение.` : 'Названия устройств появятся после разрешения доступа.';
   if (isHost) {
     $('video-placeholder-title').textContent = mediaBusy ? 'Устраиваемся поудобнее' : 'Тихое место для вашего друга';
-    $('video-placeholder-text').textContent = mediaBusy ? 'Разрешите доступ к камере и микрофону в браузере.' : 'Включите наблюдение, когда будете готовы.';
+    $('video-placeholder-text').textContent = mediaBusy ? 'Разрешите доступ к камере и микрофону в браузере.' : 'Включите наблюдение, когда будете готовы. Новый запуск очистит предыдущую историю.';
     $('media-status').textContent = mediaMessage || (hostRunning ? 'Слушаем звуки и сохраняем домашние моменты' : 'Камера и микрофон выключены');
   } else {
     if (!serverReachable) {
@@ -685,7 +728,7 @@ function fetchPhoto(event) {
     entry.url = URL.createObjectURL(blob);
     return entry.url;
   }).catch((error) => {
-    if (current === generation) {
+    if (current === generation && photoCache.get(key) === entry) {
       photoCache.delete(key);
       // Retry on the next state poll even if the event history is unchanged.
       historySignature = '';
@@ -713,8 +756,14 @@ function renderHistory() {
   const epoch = ++photoEpoch;
   const visible = events.slice(0, historyLimit);
   const last = events.find((event) => event.hasPhoto);
+  if (dialogPhotoKey && !events.some(event => event.hasPhoto && photoKey(event) === dialogPhotoKey)) {
+    $('photo-dialog').close();
+    $('dialog-photo').removeAttribute('src');
+    dialogPhotoKey = null;
+  }
   const wantedKeys = new Set(visible.filter((event) => event.hasPhoto).map(photoKey));
   if (last) wantedKeys.add(photoKey(last));
+  if (dialogPhotoKey) wantedKeys.add(dialogPhotoKey);
   for (const [key, entry] of photoCache) {
     if (!wantedKeys.has(key)) { if (entry.url) URL.revokeObjectURL(entry.url); photoCache.delete(key); }
   }
@@ -757,6 +806,10 @@ function renderHistory() {
   }
   latestPhoto = last || null;
   $('latest-photo-panel').hidden = !last;
+  if (!last) {
+    $('latest-photo').removeAttribute('src');
+    $('latest-photo-time').textContent = '';
+  }
   if (last) {
     $('latest-photo').hidden = true;
     $('latest-photo-time').textContent = fullDate(last.photoAt);
@@ -771,10 +824,12 @@ function renderHistory() {
 
 async function openPhoto(event) {
   const current = generation;
+  const key = photoKey(event);
   const url = await fetchPhoto(event);
-  if (current !== generation) return;
+  if (current !== generation || !room?.events?.some(item => item.hasPhoto && photoKey(item) === key)) return;
   if (!url) { toast('Фото не загрузилось. Попробуйте ещё раз.'); return; }
   $('dialog-photo').src = url;
+  dialogPhotoKey = key;
   $('dialog-photo-caption').textContent = `Шум дома · снимок ${fullDate(event.photoAt)}`;
   if (!$('photo-dialog').open) $('photo-dialog').showModal();
 }
@@ -931,6 +986,7 @@ $('viewer-form').addEventListener('submit', async (event) => {
   catch (error) { showError(error.message, true); }
 });
 $('capture-button').addEventListener('click', () => void toggleCapture());
+$('clear-history').addEventListener('click', () => void clearHistory());
 $('audio-button').addEventListener('click', () => void toggleViewerChannel('audio'));
 $('audio-retry').addEventListener('click', () => { void monitor?.resumeAudio().catch(error => showError(error.message)); });
 $('sensitivity').addEventListener('change', () => { settingsDirty = true; sensitivityDirty = true; $('settings-feedback').textContent = 'Есть несохранённые изменения'; });
@@ -1122,5 +1178,15 @@ async function initialize() {
     if (new URLSearchParams(location.search).get('role') === 'viewer') await chooseRole('viewer');
   }
 }
+
+// Move the existing panel so mobile visual, reading and keyboard order agree.
+const mobileLayout = window.matchMedia('(max-width: 640px)');
+function placeLatestPhoto() {
+  const panel = $('latest-photo-panel');
+  if (mobileLayout.matches) document.querySelector('.dashboard-layout').prepend(panel);
+  else $('viewer-note').before(panel);
+}
+mobileLayout.addEventListener('change', placeLatestPhoto);
+placeLatestPhoto();
 
 void initialize();

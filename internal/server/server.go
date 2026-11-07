@@ -79,30 +79,34 @@ type storedEvent struct {
 }
 
 type room struct {
-	OwnerID           string        `json:"ownerId"`
-	SourceAuthSession string        `json:"-"`
-	OwnerApproved     bool          `json:"ownerApproved"`
-	ID                string        `json:"id"`
-	Name              string        `json:"name"`
-	CreatedAt         time.Time     `json:"createdAt"`
-	HostHash          string        `json:"hostHash"`
-	ViewerHash        string        `json:"viewerHash"`
-	PairingVersion    uint64        `json:"pairingVersion"`
-	Settings          Settings      `json:"settings"`
-	LastNoiseAt       *time.Time    `json:"lastNoiseAt"`
-	LastPhotoAt       *time.Time    `json:"lastPhotoAt"`
-	Events            []storedEvent `json:"events"`
-	LastSeenAt        *time.Time    `json:"-"`
-	Monitoring        bool          `json:"-"`
-	SessionID         string        `json:"-"`
-	RetiredSessions   []string      `json:"-"`
-	source            *streamClient
-	viewers           map[*streamClient]struct{}
-	streamEpoch       uint64
-	rtcEpoch          uint64
-	eventBusy         bool
-	eventCredit       float64
-	eventCreditAt     time.Time
+	OwnerID             string        `json:"ownerId"`
+	SourceAuthSession   string        `json:"-"`
+	OwnerApproved       bool          `json:"ownerApproved"`
+	ID                  string        `json:"id"`
+	Name                string        `json:"name"`
+	CreatedAt           time.Time     `json:"createdAt"`
+	HostHash            string        `json:"hostHash"`
+	ViewerHash          string        `json:"viewerHash"`
+	PairingVersion      uint64        `json:"pairingVersion"`
+	Settings            Settings      `json:"settings"`
+	LastNoiseAt         *time.Time    `json:"lastNoiseAt"`
+	LastPhotoAt         *time.Time    `json:"lastPhotoAt"`
+	Events              []storedEvent `json:"events"`
+	HistorySessionID    string        `json:"historySessionId,omitempty"`
+	HistoryVersion      uint64        `json:"historyVersion"`
+	HistoryClearedAt    *time.Time    `json:"historyClearedAt,omitempty"`
+	PhotoCleanupPending bool          `json:"photoCleanupPending,omitempty"`
+	LastSeenAt          *time.Time    `json:"-"`
+	Monitoring          bool          `json:"-"`
+	SessionID           string        `json:"-"`
+	RetiredSessions     []string      `json:"retiredSessions,omitempty"`
+	source              *streamClient
+	viewers             map[*streamClient]struct{}
+	streamEpoch         uint64
+	rtcEpoch            uint64
+	eventBusy           bool
+	eventCredit         float64
+	eventCreditAt       time.Time
 }
 
 type Server struct {
@@ -265,13 +269,15 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	route := strings.Join(parts[3:], "/")
-	if (r.Method == http.MethodPost && (route == "events" || route == "heartbeat" || route == "pairing" || route == "qr" || route == "approval")) || (r.Method == http.MethodPut && route == "settings") || (r.Method == http.MethodDelete && route == "") {
+	if (r.Method == http.MethodPost && (route == "events" || route == "heartbeat" || route == "pairing" || route == "qr" || route == "approval")) || (r.Method == http.MethodPut && route == "settings") || (r.Method == http.MethodDelete && (route == "" || route == "events")) {
 		if role != "host" {
 			fail(w, 403, "Действие доступно только устройству питомца")
 			return
 		}
 	}
 	switch {
+	case route == "events" && r.Method == http.MethodDelete:
+		s.clearHistory(w, room)
 	case route == "" && r.Method == http.MethodDelete:
 		s.deleteRoom(w, room)
 	case route == "approval" && r.Method == http.MethodPost:
@@ -394,34 +400,67 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request, current *room
 	// Retired camera sessions may still have HTTP requests in flight. Neither a
 	// delayed start nor a delayed stop may replace or refresh the current session.
 	if slices.Contains(current.RetiredSessions, body.SessionID) {
-		writeJSON(w, 200, map[string]bool{"ok": true})
+		writeHeartbeat(w, current)
 		return
 	}
+	updated := *current
+	updated.RetiredSessions = slices.Clone(current.RetiredSessions)
 	if !*body.Monitoring && current.SessionID != "" && current.SessionID != body.SessionID {
 		if body.Stopped {
-			retireSession(current, body.SessionID)
+			retireSession(&updated, body.SessionID)
+			if err := s.save(&updated); err != nil {
+				fail(w, 500, "Не удалось сохранить завершение наблюдения")
+				return
+			}
+			*current = updated
 		}
-		writeJSON(w, 200, map[string]bool{"ok": true})
+		writeHeartbeat(w, current)
 		return
 	}
 	if current.SessionID != "" && current.SessionID != body.SessionID {
-		retireSession(current, current.SessionID)
+		retireSession(&updated, current.SessionID)
 	}
 	// A suspended AudioContext reports monitoring:false but can resume this
 	// session. Only an explicit terminal stop retires its identifier.
 	if body.Stopped {
-		retireSession(current, body.SessionID)
+		retireSession(&updated, body.SessionID)
 	}
 	if current.Monitoring != *body.Monitoring || current.SessionID != body.SessionID || !s.roomFreshLocked(current) {
-		current.rtcEpoch++
+		updated.rtcEpoch++
 	}
 	now := s.now()
-	current.LastSeenAt = &now
-	current.Monitoring = *body.Monitoring
-	current.SessionID = body.SessionID
-	current.SourceAuthSession = s.sessionKey(r)
+	newStart := *body.Monitoring && current.HistorySessionID != body.SessionID
+	if newStart {
+		if current.HistorySessionID != "" {
+			retireSession(&updated, current.HistorySessionID)
+		}
+		updated = emptiedHistory(&updated)
+		updated.HistorySessionID = body.SessionID
+		// Samples may already be queued while the initial heartbeat connects.
+		// The new session identity excludes old uploads without discarding them.
+		updated.HistoryClearedAt = nil
+		updated.LastPhotoAt = nil
+	}
+	updated.LastSeenAt = &now
+	updated.Monitoring = *body.Monitoring
+	updated.SessionID = body.SessionID
+	updated.SourceAuthSession = s.sessionKey(r)
+	if newStart || body.Stopped {
+		if err := s.save(&updated); err != nil {
+			fail(w, 500, "Не удалось сохранить запуск или остановку наблюдения")
+			return
+		}
+	}
+	*current = updated
+	if newStart {
+		s.retryHistoryCleanup(current)
+	}
 	s.refreshSourceLocked(current)
-	writeJSON(w, 200, map[string]bool{"ok": true})
+	writeHeartbeat(w, current)
+}
+
+func writeHeartbeat(w http.ResponseWriter, current *room) {
+	writeJSON(w, 200, map[string]any{"ok": true, "historyVersion": current.HistoryVersion})
 }
 
 func retireSession(current *room, id string) {

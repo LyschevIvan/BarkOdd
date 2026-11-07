@@ -11,5 +11,6 @@
 @media(max-width:420px){.account-tools{order:3;width:100%;justify-content:flex-end}.site-header>#switch-role{margin-left:auto!important}.account-tools>span{max-width:180px}.owned-room .account-actions{align-items:stretch;flex-direction:column}.owned-room .button{width:100%}}
 
 /* Independent viewing and listening controls. */
+.history-actions{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0}.history-actions .text-button{min-height:36px}.history-policy{font-size:11px;color:var(--muted);margin-top:8px;line-height:1.7}.dashboard-layout>.latest-photo-panel{width:100%}
 .control-buttons{flex-wrap:wrap}.control-buttons .button[aria-pressed="true"]{box-shadow:inset 0 0 0 2px #a3b58b}.audio-retry{text-align:left;color:#f2c27e;font-size:11px;padding:3px 0}.video-controls #audio-button{background:#334c3c;color:#f5f3e7;border-color:#64775a}.media-caption #audio-status[data-state="blocked"],.media-caption #audio-status[data-state="error"]{color:#f2c27e}
 @media(max-width:640px){.video-controls .control-buttons{flex-wrap:wrap}.control-buttons #capture-button,.control-buttons #audio-button{flex:1 1 130px;justify-content:center;padding:10px 8px}.media-caption{width:100%}}
