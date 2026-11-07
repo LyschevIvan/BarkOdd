@@ -987,20 +987,7 @@ async function loadUsers() {
       try { await request(`api/admin/users/${encodeURIComponent(user.id)}`, { method: 'PUT', body: { disabled: !user.disabled }, actorID: actor.id }); if (current()) await loadUsers(); }
       catch (error) { if (current()) { showError(error.message, true); toggle.disabled = false; } }
     });
-    const form = textElement('form', 'input-action', '');
-    const input = document.createElement('input');
-    input.type = 'password'; input.minLength = 12; input.maxLength = 256; input.required = true; input.autocomplete = 'new-password'; input.placeholder = 'Новый пароль'; input.setAttribute('aria-label', `Новый пароль для ${user.username}`);
-    const reset = textElement('button', 'button button-secondary', 'Сбросить пароль'); reset.type = 'submit';
-    form.append(input, reset);
-    form.addEventListener('submit', async event => {
-      event.preventDefault();
-      if (!current()) return;
-      const password = input.value; input.value = ''; reset.disabled = true;
-      try { await request(`api/admin/users/${encodeURIComponent(user.id)}/password`, { method: 'POST', body: { password }, actorID: actor.id }); if (current()) toast('Пароль сброшен. Сессии пользователя завершены.'); }
-      catch (error) { if (current()) showError(error.message, true); }
-      finally { if (current()) reset.disabled = false; }
-    });
-    card.append(toggle, form); $('users-list').append(card);
+    card.append(toggle); $('users-list').append(card);
   }
 }
 $('users-toggle').addEventListener('click', async () => {

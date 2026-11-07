@@ -161,7 +161,7 @@ func TestAuthLogoutExpiryAndPermissions(t *testing.T) {
 		t.Fatal("expired session valid")
 	}
 }
-func TestAuthAdminDisableAndPasswordReset(t *testing.T) {
+func TestAuthAdminDisableAndUserPasswordChange(t *testing.T) {
 	s := authTestServer(t, "multi_user")
 	cookie, id := authRegister(t, s, "alice")
 	admin := authAdmin(t, s)
@@ -176,25 +176,42 @@ func TestAuthAdminDisableAndPasswordReset(t *testing.T) {
 		t.Fatal("disable kept session")
 	}
 	authRequest(s, "PUT", "/api/admin/users/"+id, `{"disabled":false}`, admin)
-	w = authRequest(s, "POST", "/api/admin/users/"+id+"/password", `{"password":"new secure password"}`, admin)
-	if w.Code != 200 {
-		t.Fatal(w.Code)
-	}
 	w = authRequest(s, "POST", "/api/auth/login", `{"username":"alice","password":"`+authTestPassword+`"}`, nil)
-	if w.Code != 401 {
-		t.Fatal("old password works")
-	}
-	w = authRequest(s, "POST", "/api/auth/login", `{"username":"alice","password":"new secure password"}`, nil)
 	if w.Code != 200 {
-		t.Fatalf("new password fails: %s", w.Body)
+		t.Fatalf("password fails after reenable: %s", w.Body)
 	}
 	cookie = w.Result().Cookies()[0]
-	w = authRequest(s, "POST", "/api/auth/password", `{"currentPassword":"new secure password","newPassword":"another secure password"}`, cookie)
+	w = authRequest(s, "POST", "/api/auth/password", `{"currentPassword":"`+authTestPassword+`","newPassword":"another secure password"}`, cookie)
 	if w.Code != 200 {
 		t.Fatal(w.Code)
 	}
 	if w = authRequest(s, "GET", "/api/auth", "", cookie); !strings.Contains(w.Body.String(), `"user":null`) {
 		t.Fatal("password change kept session")
+	}
+	if w = authRequest(s, "POST", "/api/auth/login", `{"username":"alice","password":"`+authTestPassword+`"}`, nil); w.Code != 401 {
+		t.Fatal("old password works after password change")
+	}
+	if w = authRequest(s, "POST", "/api/auth/login", `{"username":"alice","password":"another secure password"}`, nil); w.Code != 200 {
+		t.Fatalf("new password fails: %s", w.Body)
+	}
+}
+
+func TestAuthAdminCannotResetUserPassword(t *testing.T) {
+	s := authTestServer(t, "multi_user")
+	cookie, id := authRegister(t, s, "alice")
+	admin := authAdmin(t, s)
+	w := authRequest(s, "POST", "/api/admin/users/"+id+"/password", `{"password":"admin chosen password"}`, admin)
+	if w.Code != 404 {
+		t.Errorf("admin password reset: got %d, want 404", w.Code)
+	}
+	if w = authRequest(s, "GET", "/api/auth", "", cookie); !strings.Contains(w.Body.String(), `"id":"`+id+`"`) {
+		t.Error("rejected password reset revoked the user's session")
+	}
+	if w = authRequest(s, "POST", "/api/auth/login", `{"username":"alice","password":"admin chosen password"}`, nil); w.Code != 401 {
+		t.Error("administrator can impersonate the user with a chosen password")
+	}
+	if w = authRequest(s, "POST", "/api/auth/login", `{"username":"alice","password":"`+authTestPassword+`"}`, nil); w.Code != 200 {
+		t.Errorf("rejected password reset changed the user's password: %s", w.Body)
 	}
 }
 func TestAuthFailedPersistenceLeavesLiveUser(t *testing.T) {

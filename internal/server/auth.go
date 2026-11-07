@@ -558,57 +558,25 @@ func (s *Server) authAdminRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/admin/users/"), "/")
-	if !strings.HasPrefix(r.URL.Path, "/api/admin/users/") || len(parts) < 1 || !storageID.MatchString(parts[0]) {
+	if !strings.HasPrefix(r.URL.Path, "/api/admin/users/") || len(parts) != 1 || !storageID.MatchString(parts[0]) {
 		fail(w, 404, "Пользователь не найден")
 		return
 	}
 	id := parts[0]
-	var disabled *bool
-	var hash, salt string
-	switch {
-	case len(parts) == 1:
-		if r.Method != "PUT" {
-			fail(w, 405, "Метод не поддерживается")
-			return
-		}
-		var body struct {
-			Disabled *bool `json:"disabled"`
-		}
-		if !readJSON(w, r, 4096, &body) {
-			return
-		}
-		if body.Disabled == nil {
-			fail(w, 400, "Укажите disabled")
-			return
-		}
-		disabled = body.Disabled
-	case len(parts) == 2 && parts[1] == "password":
-		if r.Method != "POST" {
-			fail(w, 405, "Метод не поддерживается")
-			return
-		}
-		var body struct {
-			Password string `json:"password"`
-		}
-		if !readJSON(w, r, 4096, &body) {
-			return
-		}
-		if !validAuthPassword(body.Password) {
-			fail(w, 400, "Пароль должен содержать 12–128 символов")
-			return
-		}
-		if !s.authHashSlot(w, r, "reset", id) {
-			return
-		}
-		defer func() { <-s.auth.hashSlots }()
-		var err error
-		hash, salt, err = newAuthPassword(body.Password)
-		if err != nil {
-			fail(w, 500, "Не удалось создать пароль")
-			return
-		}
-	default:
-		fail(w, 404, "Адрес не найден")
+	if r.Method != "PUT" {
+		fail(w, 405, "Метод не поддерживается")
+		return
+	}
+	// Administrators may disable accounts, but must not set credentials that
+	// would let them sign in as another user and access that user's media.
+	var body struct {
+		Disabled *bool `json:"disabled"`
+	}
+	if !readJSON(w, r, 4096, &body) {
+		return
+	}
+	if body.Disabled == nil {
+		fail(w, 400, "Укажите disabled")
 		return
 	}
 	s.mu.Lock()
@@ -624,12 +592,7 @@ func (s *Server) authAdminRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updated := *target
-	if disabled != nil {
-		updated.Disabled = *disabled
-	} else {
-		updated.PasswordHash = hash
-		updated.Salt = salt
-	}
+	updated.Disabled = *body.Disabled
 	users := cloneAuthUsers(s.auth.users)
 	users[id] = &updated
 	if err := s.saveAuthUsersLocked(users); err != nil {
@@ -637,15 +600,9 @@ func (s *Server) authAdminRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.auth.users = users
-	if disabled == nil || updated.Disabled {
+	if updated.Disabled {
 		s.revokeUserSessionsLocked(id)
-	}
-	if disabled != nil && updated.Disabled {
 		s.invalidateAuthLocked("", id)
 	}
-	if disabled != nil {
-		writeJSON(w, 200, map[string]any{"user": &updated})
-	} else {
-		writeJSON(w, 200, map[string]bool{"ok": true})
-	}
+	writeJSON(w, 200, map[string]any{"user": &updated})
 }

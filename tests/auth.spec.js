@@ -78,7 +78,7 @@ test('new browser recovers rooms through its session without rotating guest link
   await context.close();
 });
 
-test('self registration isolates rooms, password change signs out, administrator can block and reset', async ({ page, browser, baseURL }) => {
+test('self registration isolates rooms, password change signs out, administrator can only block and unblock', async ({ page, browser, baseURL }) => {
   test.skip(mode !== 'multi_user');
   const first = unique('alice');
   await register(page, first);
@@ -105,8 +105,13 @@ test('self registration isolates rooms, password change signs out, administrator
   const adminContext = await browser.newContext();
   const manager = await adminContext.newPage();
   await admin(manager);
+  await expect(manager.locator('.owned-room').filter({ hasText: 'Private home' })).toHaveCount(0);
+  expect((await manager.request.get(endpoint(baseURL, `api/rooms/${binding.id}`))).status()).toBe(401);
   await manager.locator('#users-toggle').click();
   const user = manager.locator('.user-card').filter({ hasText: first });
+  await expect(user).toHaveCount(1);
+  await expect(user.getByRole('button', { name: 'Сбросить пароль', exact: true })).toHaveCount(0);
+  await expect(user.locator('input[type=password]')).toHaveCount(0);
   await user.getByRole('button', { name: 'Заблокировать', exact: true }).click();
   await expect(user.getByRole('button', { name: 'Разблокировать', exact: true })).toBeVisible();
   await expect(page.locator('#auth-panel')).toBeVisible();
@@ -114,11 +119,8 @@ test('self registration isolates rooms, password change signs out, administrator
   expect((await second.request.get(endpoint(baseURL, `api/rooms/${binding.id}`), { headers: { Authorization: `Bearer ${binding.viewerToken}` } })).status()).toBe(401);
   await user.getByRole('button', { name: 'Разблокировать', exact: true }).click();
   await expect(user.getByRole('button', { name: 'Заблокировать', exact: true })).toBeVisible();
-  await user.locator('input').fill('Reset-home-password-2026');
-  await user.getByRole('button', { name: 'Сбросить пароль', exact: true }).click();
-  await expect(manager.locator('#toast')).toContainText('Пароль сброшен');
   await page.locator('#login-username').fill(first);
-  await page.locator('#login-password').fill('Reset-home-password-2026');
+  await page.locator('#login-password').fill('Changed-home-password-2026');
   await page.locator('#login-form button').click();
   await expect(page.locator('.owned-room')).toHaveCount(1);
   await secondContext.close();
