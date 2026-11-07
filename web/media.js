@@ -1,5 +1,6 @@
 import { NoiseDetector } from './noise.js';
 import { createRTC } from './rtc.js';
+import { createAudioCapture, createAudioPlayer, AUDIO_PACKET_BYTES } from './audio.js';
 
 const noop = () => {};
 const now = () => performance.now();
@@ -8,13 +9,29 @@ const cancelled = () => Object.assign(new Error('Наблюдение остан
 const MAX_FRAME_BYTES = 200 * 1024;
 const TURN_REFRESH_MS = 45 * 60 * 1000;
 
-export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStream = noop, onFrame = noop, onTransport = noop, onRemoteStream = noop, onError = noop }) {
+export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLevel = noop, onLocalStream = noop, onFrame = noop, onTransport = noop, onRemoteStream = noop, onError = noop }) {
   let host = null;
   let viewer = null;
   let destroyed = false;
   let lastStatus = '';
   let currentFrame = null;
   const errors = new Map();
+  const wantsAudio = state => state.mode === 'audio' || state.mode === 'audio-video';
+  const wantsVideo = state => state.mode !== 'audio';
+
+  function audioStatus(state, kind, message) {
+    if (!state.active || !wantsAudio(state)) return;
+    if (state.outputBlocked && kind !== 'blocked' && kind !== 'error') return;
+    emit(onAudioStatus, { kind, message });
+  }
+
+  function clearAudio(state) {
+    state.audioRevision = (state.audioRevision || 0) + 1;
+    cancelTimer(state, state.audioTimer);
+    state.audioReceived = false;
+    state.player?.reset();
+    audioStatus(state, 'connecting', 'Ожидаем звук с устройства питомца…');
+  }
 
   function emit(callback, value) {
     // A rendering error must not stop microphone processing or leave devices open.
@@ -45,7 +62,7 @@ export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStr
   }
 
   function session() {
-    return { active: true, timers: new Set(), requests: new Set(), socket: null, ready: false, viewers: 0, retryDelay: 500, authFailed: false };
+    return { active: true, timers: new Set(), requests: new Set(), socket: null, ready: false, viewers: 0, audioViewers: 0, retryDelay: 500, authFailed: false };
   }
 
   function later(state, delay, callback) {
@@ -98,6 +115,9 @@ export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStr
     state.socket = null;
     state.ready = false;
     state.viewers = 0;
+    state.audioViewers = 0;
+    state.capture?.setEnabled(false);
+    if (state.role === 'viewer') clearAudio(state);
     state.rtc?.close();
     state.rtc = null;
     state.remoteStream = null;
@@ -180,7 +200,7 @@ export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStr
     state.sourceOnline = false;
     state.sourceMonitoring = false;
     state.pendingControl = null;
-    socket.binaryType = 'blob';
+    socket.binaryType = 'arraybuffer';
     const current = () => state.active && state.socket === socket;
     const lost = code => {
       if (!current()) return;
@@ -195,6 +215,7 @@ export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStr
       if (!current()) return;
       const auth = { type: 'auth', role: state.role, token: api.token };
       if (state.role === 'host') auth.sessionId = state.sessionId;
+      else if (state.mode !== 'video') auth.mode = state.mode;
       try { socket.send(JSON.stringify(auth)); } catch (_) { lost(); }
     };
     socket.onclose = event => lost(event.code);
@@ -203,8 +224,13 @@ export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStr
     socket.onerror = noop;
     function applyControl(message) {
       if (state.role === 'host') {
-        state.viewers = Number.isInteger(message.count) ? Math.max(0, Math.min(6, message.count)) : 0;
+        const count = message.videoCount ?? message.count;
+        state.viewers = Number.isInteger(count) ? Math.max(0, Math.min(6, count)) : 0;
+        state.audioViewers = Number.isInteger(message.audioCount) ? Math.max(0, Math.min(6, message.audioCount)) : 0;
+        syncAudioCapture(state);
       } else {
+        if (state.sourceId !== message.sourceId || !message.online || !message.monitoring) clearAudio(state);
+        state.sourceId = message.sourceId;
         state.sourceOnline = message.online === true;
         state.sourceMonitoring = message.monitoring === true;
       }
@@ -214,17 +240,30 @@ export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStr
         if (!state.sourceOnline || !state.sourceMonitoring) {
           clearFrame(state);
           status('offline', state.sourceOnline ? 'Наблюдение на устройстве питомца остановлено' : 'Устройство питомца не в сети');
-        } else if (!currentFrame && !state.remoteStream) status('connecting', 'Ожидаем кадры с устройства питомца…');
+        } else if (!currentFrame && !state.remoteStream) status('connecting', wantsVideo(state) ? 'Ожидаем кадры с устройства питомца…' : 'Ожидаем звук с устройства питомца…');
       }
     }
     socket.onmessage = event => {
       if (!current()) return;
       if (typeof event.data !== 'string') {
         if (state.role !== 'viewer' || !state.ready || state.transport !== 'websocket' || !state.sourceOnline || !state.sourceMonitoring) return;
-        if (!(event.data instanceof Blob) || !event.data.size || event.data.size > MAX_FRAME_BYTES) return;
+        let data = event.data;
+        if (data instanceof ArrayBuffer) {
+          const bytes = new Uint8Array(data);
+          if (bytes[0] === 66 && bytes[1] === 75 && bytes[2] === 65 && bytes[3] === 49) {
+            if (!wantsAudio(state) || data.byteLength !== AUDIO_PACKET_BYTES || !state.player?.enqueue(data)) return;
+            state.audioReceived = true;
+            cancelTimer(state, state.audioTimer);
+            audioStatus(state, 'live', 'Слушаем звук дома');
+            state.audioTimer = later(state, 3000, () => clearAudio(state));
+            return;
+          }
+          data = new Blob([data], { type: 'image/jpeg' });
+        }
+        if (!wantsVideo(state) || !(data instanceof Blob) || !data.size || data.size > MAX_FRAME_BYTES) return;
         cancelTimer(state, state.frameTimer);
         // WebSocket binary blobs have no MIME type. Set it before the UI decodes.
-        frame(event.data.type === 'image/jpeg' ? event.data : new Blob([event.data], { type: 'image/jpeg' }));
+        frame(data.type === 'image/jpeg' ? data : new Blob([data], { type: 'image/jpeg' }));
         status('live', 'Прямая трансляция');
         state.frameTimer = later(state, 3000, () => {
           frame(null);
@@ -241,6 +280,7 @@ export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStr
       } else if (message.type === 'ready' && message.role === state.role) {
         state.rtc?.close();
         state.rtc = null;
+        if (state.role === 'viewer') clearAudio(state);
         state.ready = true;
         state.transport = message.mediaTransport || 'websocket';
         cancelTimer(state, state.iceRefreshTimer);
@@ -253,13 +293,15 @@ export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStr
           try {
             state.rtc = createRTC({
               role: state.role, clientId: message.clientId, iceServers: message.iceServers,
-              stream: state.stream,
+              stream: state.stream, mode: state.mode,
               send: signal => {
                 if (current() && state.ready && socket.readyState === 1) {
                   try { socket.send(JSON.stringify(signal)); } catch (_) { lost(); }
                 }
               },
               onStream: stream => { state.remoteStream = stream; emit(onRemoteStream, stream); },
+              onAudioStream: stream => { if (current()) state.player?.setStream(stream); },
+              onAudioStatus: (kind, message) => { if (current()) { state.audioReceived = kind === 'live'; audioStatus(state, kind, message); } },
               onStatus: status,
               onError: report,
             });
@@ -290,6 +332,31 @@ export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStr
 
   function healthySource(state) {
     return !audioInputIssue(state) && state.stream.getTracks().every(track => track.readyState === 'live' && track.enabled && !track.muted);
+  }
+
+  function canSendAudio(state) {
+    return state.active && state.ready && state.transport === 'websocket' && state.socket?.readyState === 1 && state.audioViewers > 0 && healthySource(state);
+  }
+
+  function syncAudioCapture(state) {
+    const enabled = canSendAudio(state);
+    if (state.capture) { state.capture.setEnabled(enabled); return; }
+    if (!enabled || state.capturePending || state.captureFailed) return;
+    state.capturePending = true;
+    void createAudioCapture({
+      context: state.audio, source: state.source,
+      onPacket: packet => {
+        if (!canSendAudio(state) || state.socket.bufferedAmount > AUDIO_PACKET_BYTES * 3) return;
+        try { state.socket.send(packet); } catch (error) { report(error); }
+      },
+      onError: error => { if (state.active) report(error); },
+    }).then(capture => {
+      if (!state.active) { capture.close(); return; }
+      state.capture = capture;
+      capture.setEnabled(canSendAudio(state));
+    }).catch(error => {
+      if (state.active) { state.captureFailed = true; report(error); }
+    }).finally(() => { state.capturePending = false; });
   }
 
   function canSendFrame(state, socket) {
@@ -356,6 +423,7 @@ export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStr
     if (!state.active) return;
     try {
       state.rtc?.setPublishing(healthySource(state));
+      syncAudioCapture(state);
       const inputIssue = audioInputIssue(state);
       if (inputIssue) {
         // Suspended audio or an unavailable input can leave a retained waveform.
@@ -510,6 +578,7 @@ export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStr
     if (!state) return;
     host = null;
     stopSession(state);
+    state.capture?.close();
     if (state.visibility) document.removeEventListener('visibilitychange', state.visibility);
     state.stream?.getTracks().forEach(track => { track.onended = null; track.stop(); });
     if (state.video) { state.video.pause(); state.video.srcObject = null; }
@@ -530,13 +599,32 @@ export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStr
     await Promise.allSettled(cleanup);
   }
 
-  async function startViewer() {
+  async function startViewer({ mode = 'video' } = {}) {
     if (destroyed) throw new Error('Наблюдение уже закрыто');
-    if (viewer?.active) return;
+    if (!['video', 'audio', 'audio-video'].includes(mode)) throw new Error('Неизвестный режим трансляции');
+    if (viewer?.active && viewer.mode === mode) return;
+    // Teardown is synchronous, including silencing queued audio. Do not await
+    // here: AudioContext.resume must retain the button's user activation.
+    void stopViewer();
     if (!globalThis.WebSocket) throw new Error('Этот браузер не поддерживает видеотрансляцию через WebSocket.');
     const state = session();
     state.role = 'viewer';
+    state.mode = mode;
     viewer = state;
+    if (wantsAudio(state)) {
+      try {
+        state.player = createAudioPlayer({ onStatus: value => {
+          if (!state.active) return;
+          state.outputBlocked = value.kind === 'blocked' || value.kind === 'error';
+          if (value.kind === 'waiting' && state.audioReceived) audioStatus(state, 'live', 'Слушаем звук дома');
+          else audioStatus(state, value.kind, value.message);
+        } });
+        void resumeAudio();
+      } catch (error) {
+        state.outputBlocked = true;
+        audioStatus(state, 'error', error.message);
+      }
+    } else emit(onAudioStatus, { kind: 'idle', message: 'Звук выключен' });
     status('connecting', 'Проверяем устройство питомца…');
     connectSocket(state);
   }
@@ -546,8 +634,20 @@ export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStr
     if (!state) return;
     viewer = null;
     stopSession(state);
+    void state.player?.close();
     clearFrame(state);
+    emit(onAudioStatus, { kind: 'idle', message: 'Звук выключен' });
     status('idle', 'Прямая трансляция выключена');
+  }
+
+  async function resumeAudio() {
+    const state = viewer;
+    if (!state?.active || !state.player) return;
+    const revision = state.audioRevision || 0;
+    const resumed = await state.player.resume();
+    if (!state.active || revision !== (state.audioRevision || 0)) return;
+    state.outputBlocked = !resumed;
+    if (resumed) audioStatus(state, state.audioReceived ? 'live' : 'connecting', state.audioReceived ? 'Слушаем звук дома' : 'Ожидаем звук с устройства питомца…');
   }
 
   function updateSettings(settings) {
@@ -560,5 +660,5 @@ export function createMonitor({ api, onStatus = noop, onLevel = noop, onLocalStr
     errors.clear();
   }
 
-  return { startHost, stopHost, startViewer, stopViewer, updateSettings, destroy };
+  return { startHost, stopHost, startViewer, stopViewer, resumeAudio, updateSettings, destroy };
 }

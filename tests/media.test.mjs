@@ -38,11 +38,16 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
   const localStreams = [];
   const transports = [];
   const remoteStreams = [];
+  const audioStatuses = [];
+  const playbacks = [];
+  const worklets = [];
+  let mediaRequests = 0;
   let pendingMedia;
   let pendingWake;
   let releasedLocks = 0;
   let heartbeatResponse = () => Promise.resolve();
   let eventResponse = () => Promise.resolve();
+  let resumeResponse = null;
   const wakeLock = target({ release() { releasedLocks++; this.dispatchEvent({ type: 'release' }); return Promise.resolve(); } });
   class FrameBlob {
     constructor(parts = [], { type = '' } = {}) { this.size = parts.reduce((size, part) => size + (part.byteLength ?? part.size ?? part.length), 0); this.type = type; }
@@ -53,7 +58,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     send(data) { assert.equal(this.readyState, 1); this.sent.push({ data, at: time }); }
     close(code = 1000) { this.readyState = 3; this.closeCode = code; this.onclose?.({ code }); }
     open() { this.readyState = 1; this.onopen?.(); }
-    receive(data) { this.onmessage?.({ data: typeof data === 'object' && !(data instanceof FrameBlob) ? JSON.stringify(data) : data }); }
+    receive(data) { this.onmessage?.({ data: typeof data === 'object' && !(data instanceof FrameBlob) && !(data instanceof ArrayBuffer) ? JSON.stringify(data) : data }); }
     binary() { return this.sent.filter(item => item.data instanceof FrameBlob); }
   }
   replace('WebSocket', Socket);
@@ -72,15 +77,23 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
   const node = () => ({ connect() {}, disconnect() {} });
   let audioContext;
   class AudioContext {
-    constructor() { this.state = 'running'; audioContext = this; }
+    constructor() { target(this); this.state = 'running'; this.sampleRate = 48000; this.destination = node(); this.audioWorklet = { addModule: async () => {} }; audioContext = this; }
+    get currentTime() { return time / 1000; }
     createMediaStreamSource() { return node(); }
+    createGain() { return { ...node(), gain: { value: 1 } }; }
+    createBuffer(channels, length, rate) { const data = new Float32Array(length); return { duration: length / rate, copyToChannel(samples) { data.set(samples); }, getChannelData: () => data }; }
+    createBufferSource() { const source = { ...node(), start(at) { this.at = at; playbacks.push(this); }, stop() { this.stopped = true; } }; return source; }
     createAnalyser() {
       // Retained samples must not become an event while their input is muted.
       return { ...node(), getFloatTimeDomainData: samples => samples.fill(audioLevel) };
     }
-    resume() { this.state = 'running'; return Promise.resolve(); }
+    resume() { this.state = 'running'; return resumeResponse ? resumeResponse(this) : Promise.resolve(); }
     close() { this.state = 'closed'; return Promise.resolve(); }
   }
+  replace('AudioWorkletNode', class {
+    constructor() { this.port = { onmessage: null, postMessage() {}, close() {} }; worklets.push(this); }
+    connect() {} disconnect() {}
+  });
   replace('setTimeout', (callback, delay = 0) => {
     const id = ++nextTimer;
     timers.set(id, { at: time + delay, callback });
@@ -89,10 +102,17 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
   replace('clearTimeout', id => timers.delete(id));
   replace('performance', { now: () => time });
   replace('navigator', {
-    mediaDevices: { getUserMedia: () => deferredMedia ? new Promise(resolve => { pendingMedia = resolve; }) : Promise.resolve(stream) },
+    mediaDevices: { getUserMedia: () => { mediaRequests++; return deferredMedia ? new Promise(resolve => { pendingMedia = resolve; }) : Promise.resolve(stream); } },
     wakeLock: { request: () => deferredWake ? new Promise(resolve => { pendingWake = resolve; }) : Promise.resolve(wakeLock) },
   });
   replace('AudioContext', AudioContext);
+  replace('MediaStream', class {
+    constructor(tracks = []) { this.tracks = [...tracks]; }
+    addTrack(track) { this.tracks.push(track); }
+    removeTrack(track) { this.tracks = this.tracks.filter(item => item !== track); }
+    getAudioTracks() { return this.tracks.filter(track => track.kind === 'audio'); }
+    getTracks() { return this.tracks; }
+  });
   class Peer {
     constructor() { this.tracks = []; peers.push(this); }
     addTrack(track) { this.tracks.push(track); }
@@ -122,7 +142,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
         canvases.push(canvas);
         return canvas;
       }
-      assert.equal(name, 'video');
+      assert.ok(name === 'video' || name === 'audio');
       return {
         readyState: videoReady ? 4 : 0, videoWidth: videoReady ? 1920 : 0, videoHeight: videoReady ? 1080 : 0,
         play: () => Promise.resolve(),
@@ -147,6 +167,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     onFrame: frame => frames.push(frame),
     onError: error => errors.push(error),
     onStatus: status => statuses.push(status),
+    onAudioStatus: status => audioStatuses.push(status),
   });
   // Drain chained async API callbacks between each virtual timer.
   const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
@@ -165,7 +186,8 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     await settle();
   };
   return {
-    monitor, levels, posts, errors, statuses, frames, sockets, encodes, canvases, peers, localStreams, transports, remoteStreams, stream, advance, settle,
+    monitor, levels, posts, errors, statuses, frames, sockets, encodes, canvases, peers, localStreams, transports, remoteStreams, stream, advance, settle, audioStatuses, playbacks, worklets,
+    mediaRequests: () => mediaRequests,
     openSocket(role) {
       assert.ok(sockets.length > 0, 'monitor must connect to the WebSocket endpoint');
       const socket = sockets[sockets.length - 1];
@@ -175,12 +197,14 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     },
     onHeartbeat(callback) { heartbeatResponse = callback; },
     onEvent(callback) { eventResponse = callback; },
+    onResume(callback) { resumeResponse = callback; },
     resolveMedia() { pendingMedia(stream); },
     resolveWake() { pendingWake(wakeLock); },
     releasedLocks: () => releasedLocks,
     timerCount: () => timers.size,
     setEnabled(value) { microphone.enabled = value; },
     setAudioState(value) { audioContext.state = value; },
+    transitionAudio(value) { audioContext.state = value; audioContext.onstatechange?.(); },
     setMuted(value) {
       microphone.muted = value;
       microphone.dispatchEvent({ type: value ? 'mute' : 'unmute' });
@@ -675,6 +699,102 @@ await test('stopping a TURN viewer cancels the scheduled credential renewal', { 
   await env.monitor.stopViewer();
   assert.equal(env.timerCount(), 0);
   await env.advance(45 * 60 * 1000 + 1000); assert.equal(env.sockets.length, 1);
+});
+
+await test('audio-only viewer authenticates its selection and preserves it after reconnect without opening local devices', {}, async env => {
+  await env.monitor.startViewer({ mode: 'audio' });
+  const socket = env.openSocket('viewer');
+  assert.equal(JSON.parse(socket.sent[0].data).mode, 'audio');
+  socket.receive({ type: 'source', online: true, monitoring: true });
+  socket.receive(new Blob([new Uint8Array(10)], { type: 'image/jpeg' }));
+  assert.equal(env.frames.filter(Boolean).length, 0, 'audio-only must not display unsolicited JPEG');
+  socket.close(1006);
+  await env.advance(500);
+  const replacement = env.openSocket('viewer');
+  assert.equal(JSON.parse(replacement.sent[0].data).mode, 'audio');
+  assert.equal(env.mediaRequests(), 0, 'listening never asks for viewer microphone');
+});
+
+await test('changing selected channels replaces the old socket instead of leaving stale video subscription', {}, async env => {
+  await env.monitor.startViewer();
+  const first = env.openSocket('viewer');
+  await env.monitor.startViewer({ mode: 'audio-video' });
+  assert.equal(first.readyState, 3);
+  const next = env.openSocket('viewer');
+  assert.equal(JSON.parse(next.sent[0].data).mode, 'audio-video');
+  await env.monitor.stopViewer();
+  assert.equal(next.readyState, 3);
+  await env.advance(10000);
+  assert.equal(env.sockets.length, 2);
+});
+
+await test('unknown viewer mode is rejected before opening transport', {}, async env => {
+  await assert.rejects(env.monitor.startViewer({ mode: 'record' }), /режим/i);
+  assert.equal(env.sockets.length, 0);
+});
+
+await test('an audio-only audience does not make the host encode video but still keeps noise events', { videoReady: true }, async env => {
+  await env.monitor.startHost();
+  await env.settle();
+  const socket = env.openSocket('host');
+  socket.receive({ type: 'viewers', count: 1, ids: ['listener'], modes: { listener: 'audio' }, videoCount: 0, audioCount: 1 });
+  await env.advance(1200);
+  assert.equal(env.encodes.length, 0);
+  assert.ok(env.posts.some(post => post.path === '/events'));
+});
+
+function audioPacket(sequence = 0) {
+  const packet = new ArrayBuffer(3208);
+  new Uint8Array(packet).set([66, 75, 65, 49]);
+  new DataView(packet).setUint32(4, sequence, true);
+  return packet;
+}
+
+await test('WebSocket PCM is heard independently from JPEG and is silenced immediately on control loss', {}, async env => {
+  await env.monitor.startViewer({ mode: 'audio-video' });
+  const socket = env.openSocket('viewer');
+  socket.receive({ type: 'source', sourceId: 'host-one', online: true, monitoring: true });
+  socket.receive(audioPacket());
+  assert.equal(env.playbacks.length, 1);
+  assert.equal(env.audioStatuses[env.audioStatuses.length - 1].kind, 'live');
+  const late = socket.onmessage;
+  socket.close(1006);
+  assert.ok(env.playbacks.every(source => source.stopped));
+  late({ data: audioPacket(1) });
+  assert.equal(env.playbacks.length, 1, 'stale socket callback cannot replay audio');
+  await env.monitor.stopViewer();
+  assert.equal(env.audioStatuses[env.audioStatuses.length - 1].kind, 'idle');
+});
+
+await test('a resume invalidated by socket readiness cannot overwrite later running audio status', {}, async env => {
+  let resolve, context;
+  env.onResume(audio => { context = audio; audio.state = 'suspended'; return new Promise(done => { resolve = done; }); });
+  await env.monitor.startViewer({ mode: 'audio' });
+  const socket = env.openSocket('viewer');
+  socket.receive({ type: 'source', sourceId: 'host-one', online: true, monitoring: true });
+  context.state = 'running'; context.onstatechange(); resolve();
+  await env.settle();
+  socket.receive(audioPacket());
+  assert.equal(env.playbacks.length, 1);
+  assert.equal(env.audioStatuses[env.audioStatuses.length - 1].kind, 'live');
+});
+
+await test('RTC listening remains live after automatic browser audio resume', { rtc: true }, async env => {
+  await env.monitor.startViewer({ mode: 'audio' });
+  const socket = env.openSocket('viewer');
+  socket.receive({ type: 'ready', role: 'viewer', mediaTransport: 'webrtc', clientId: 'listener', iceServers: [] });
+  socket.receive({ type: 'source', sourceId: 'host-id', online: true, monitoring: true });
+  socket.receive({ type: 'signal', from: 'host-id', connectionId: 'audio-one', signal: { type: 'offer', sdp: 'host-offer' } });
+  await env.settle();
+  let packets = 0;
+  env.peers[0].ontrack({ track: env.stream.getAudioTracks()[0], receiver: { getStats: async () => new Map([['audio', { type: 'inbound-rtp', kind: 'audio', packetsReceived: ++packets }]]) } });
+  await env.advance(500);
+  assert.equal(env.audioStatuses[env.audioStatuses.length - 1].kind, 'live');
+  env.transitionAudio('suspended');
+  assert.equal(env.audioStatuses[env.audioStatuses.length - 1].kind, 'blocked');
+  env.transitionAudio('running');
+  await env.advance(500);
+  assert.equal(env.audioStatuses[env.audioStatuses.length - 1].kind, 'live');
 });
 
 console.log(`${passed} media tests passed; ${failed} failed`);

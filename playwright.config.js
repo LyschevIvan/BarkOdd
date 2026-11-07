@@ -25,7 +25,7 @@ const browserName = process.env.BARKODD_BROWSER || 'chromium';
 
 export default defineConfig({
   testDir: './tests',
-  testMatch: ['**/browser.spec.js', '**/microphone.spec.js', '**/auth.spec.js'],
+  testMatch: ['**/browser.spec.js', '**/microphone.spec.js', '**/auth.spec.js', '**/audio.spec.js'],
   timeout: 90000,
   expect: { timeout: 20000 },
   workers: 1,

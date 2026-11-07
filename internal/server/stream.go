@@ -51,6 +51,7 @@ type streamClient struct {
 	roomID, role, hash, sessionID string
 	authSession, ownerID          string
 	clientID                      string
+	mode                          string
 	signals                       chan queuedSignal
 	signalBytes                   int
 	lastSignal                    time.Time
@@ -58,12 +59,16 @@ type streamClient struct {
 	pairingVersion                uint64
 	authenticated, closing        bool
 	frames                        chan liveFrame
+	audio                         chan liveAudio
 	changed                       chan struct{}
 	ready                         chan struct{}
 	stop                          chan streamClose
 	lastFrame                     time.Time
 	frameCredit                   float64
+	lastAudio                     time.Time
+	audioCredit                   float64
 	writeCancel                   context.CancelFunc
+	audioWriting                  bool
 }
 
 func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, roomID string) {
@@ -88,7 +93,7 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request, roomID stri
 		fail(w, 403, "Недопустимый источник запроса")
 		return
 	}
-	c := &streamClient{authSession: s.sessionKey(r), roomID: roomID, frames: make(chan liveFrame, 1), changed: make(chan struct{}, 1), ready: make(chan struct{}, 1), stop: make(chan streamClose, 1), frameCredit: 2, signals: make(chan queuedSignal, maxSignalQueue), signalCredit: signalBurst}
+	c := &streamClient{authSession: s.sessionKey(r), roomID: roomID, frames: make(chan liveFrame, 1), audio: make(chan liveAudio, maxAudioQueue), changed: make(chan struct{}, 1), ready: make(chan struct{}, 1), stop: make(chan streamClose, 1), frameCredit: 2, audioCredit: audioBurst, signals: make(chan queuedSignal, maxSignalQueue), signalCredit: signalBurst}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -217,10 +222,11 @@ func (s *Server) streamOriginAllowed(r *http.Request) bool {
 }
 
 type streamAuth struct {
-	Type      string `json:"type"`
-	Role      string `json:"role"`
-	Token     string `json:"token"`
-	SessionID string `json:"sessionId,omitempty"`
+	Type      string          `json:"type"`
+	Role      string          `json:"role"`
+	Token     string          `json:"token"`
+	SessionID string          `json:"sessionId,omitempty"`
+	Mode      json.RawMessage `json:"mode,omitempty"`
 }
 
 func (s *Server) authenticateStream(c *streamClient, kind websocket.MessageType, data []byte) error {
@@ -228,6 +234,10 @@ func (s *Server) authenticateStream(c *streamClient, kind websocket.MessageType,
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	valid := kind == websocket.MessageText && decoder.Decode(&auth) == nil && decoder.Decode(new(any)) == io.EOF && auth.Type == "auth" && (auth.Role == "host" || auth.Role == "viewer") && len(auth.Token) <= 128
+	mode := "video"
+	if len(auth.Mode) != 0 {
+		valid = valid && auth.Role == "viewer" && json.Unmarshal(auth.Mode, &mode) == nil && string(auth.Mode) != "null" && (mode == "video" || mode == "audio" || mode == "audio-video")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	reject := func(status int, message string) error {
@@ -301,6 +311,7 @@ func (s *Server) authenticateStream(c *streamClient, kind websocket.MessageType,
 		current.viewers[c] = struct{}{}
 	}
 	c.role, c.hash, c.sessionID, c.pairingVersion = role, hash, auth.SessionID, current.PairingVersion
+	c.mode = mode
 	c.authenticated = true
 	s.pendingStreams--
 	c.ready <- struct{}{}
@@ -348,6 +359,9 @@ func (s *Server) sourceActiveLocked(r *room) bool {
 // All fanout consists of non-blocking queue operations. Immutable frame bytes
 // are shared among viewers; at most one queued frame is retained per viewer.
 func (s *Server) receiveFrame(c *streamClient, kind websocket.MessageType, data []byte) bool {
+	if kind == websocket.MessageBinary && bytes.HasPrefix(data, []byte("BKA")) {
+		return s.receiveAudio(c, data)
+	}
 	s.mu.Lock()
 	if !s.validStreamLocked(c) {
 		s.mu.Unlock()
@@ -396,7 +410,7 @@ func (s *Server) receiveFrame(c *streamClient, kind websocket.MessageType, data 
 	}
 	frame := liveFrame{data: data, source: c, epoch: epoch}
 	for viewer := range r.viewers {
-		if !s.validStreamLocked(viewer) {
+		if !s.validStreamLocked(viewer) || !viewer.wantsVideo() {
 			continue
 		}
 		select {
@@ -426,21 +440,32 @@ func (s *Server) streamWriter(ctx context.Context, c *streamClient) {
 	ready := false
 	lastState := ""
 	var signals <-chan queuedSignal
-	write := func(kind websocket.MessageType, data []byte) error {
-		writeCtx, cancelWrite := context.WithTimeout(ctx, streamWriteTimeout)
+	writeChecked := func(kind websocket.MessageType, data []byte, deadline time.Time, allowed func() bool) error {
+		writeCtx, cancelWrite := context.WithDeadline(ctx, deadline)
 		defer cancelWrite()
 		s.mu.Lock()
 		if c.closing {
 			s.mu.Unlock()
 			return context.Canceled
 		}
+		// The audio lease and access checks share the lock with registration of
+		// writeCancel, so revocation cannot slip between a check and a write.
+		if allowed != nil && !allowed() {
+			s.mu.Unlock()
+			return nil
+		}
 		c.writeCancel = cancelWrite
+		c.audioWriting = allowed != nil
 		s.mu.Unlock()
 		err := c.conn.Write(writeCtx, kind, data)
 		s.mu.Lock()
 		c.writeCancel = nil
+		c.audioWriting = false
 		s.mu.Unlock()
 		return err
+	}
+	write := func(kind websocket.MessageType, data []byte) error {
+		return writeChecked(kind, data, time.Now().Add(streamWriteTimeout), nil)
 	}
 	state := func(force bool) bool {
 		s.mu.Lock()
@@ -452,13 +477,22 @@ func (s *Server) streamWriter(ctx context.Context, c *streamClient) {
 		var message any
 		if c.role == "host" {
 			ids := make([]string, 0, len(r.viewers))
+			modes := make(map[string]string, len(r.viewers))
+			videoCount, audioCount := 0, 0
 			for viewer := range r.viewers {
 				if s.validStreamLocked(viewer) {
 					ids = append(ids, viewer.clientID)
+					modes[viewer.clientID] = viewer.subscriptionMode()
+					if viewer.wantsVideo() {
+						videoCount++
+					}
+					if viewer.wantsAudio() {
+						audioCount++
+					}
 				}
 			}
 			sort.Strings(ids)
-			message = map[string]any{"type": "viewers", "count": len(ids), "ids": ids, "monitoring": s.sourceActiveLocked(r)}
+			message = map[string]any{"type": "viewers", "count": len(ids), "ids": ids, "modes": modes, "videoCount": videoCount, "audioCount": audioCount, "monitoring": s.sourceActiveLocked(r)}
 		} else {
 			online := r.source != nil && s.validStreamLocked(r.source) && s.roomFreshLocked(r)
 			sourceID := ""
@@ -568,10 +602,18 @@ func (s *Server) streamWriter(ctx context.Context, c *streamClient) {
 		case frame := <-c.frames:
 			s.mu.Lock()
 			r := s.rooms[c.roomID]
-			allowed := ready && s.validStreamLocked(c) && r != nil && r.source == frame.source && r.streamEpoch == frame.epoch && s.sourceActiveLocked(r)
+			allowed := ready && c.wantsVideo() && s.validStreamLocked(c) && r != nil && r.source == frame.source && r.streamEpoch == frame.epoch && s.sourceActiveLocked(r)
 			s.mu.Unlock()
 			if allowed {
 				if err := write(websocket.MessageBinary, frame.data); err != nil {
+					return
+				}
+			}
+		case packet := <-c.audio:
+			if ready {
+				if err := writeChecked(websocket.MessageBinary, packet.data, packet.received.Add(audioMaxAge), func() bool {
+					return s.validAudioLocked(c, packet)
+				}); err != nil {
 					return
 				}
 			}
@@ -598,6 +640,7 @@ func (s *Server) closeStreamLocked(c *streamClient, reason streamClose) {
 		return
 	}
 	c.closing = true
+	s.discardAudioLocked(c)
 	if c.writeCancel != nil {
 		// Context cancellation only signals the transport goroutine; no socket
 		// I/O or waiting takes place while the room mutex is held.
@@ -608,6 +651,9 @@ func (s *Server) closeStreamLocked(c *streamClient, reason streamClose) {
 			r.source = nil
 			r.streamEpoch++
 			r.rtcEpoch++
+			for viewer := range r.viewers {
+				s.discardAudioLocked(viewer)
+			}
 		}
 		delete(r.viewers, c)
 		s.notifyRoomLocked(r)
@@ -628,6 +674,11 @@ func (s *Server) refreshSourceLocked(r *room) {
 	r.streamEpoch++
 	if r.source != nil && (r.source.sessionID != r.SessionID || slices.Contains(r.RetiredSessions, r.source.sessionID)) {
 		s.closeStreamLocked(r.source, streamClose{code: 1000})
+	}
+	if !s.sourceActiveLocked(r) {
+		for viewer := range r.viewers {
+			s.discardAudioLocked(viewer)
+		}
 	}
 	s.notifyRoomLocked(r)
 }

@@ -26,6 +26,8 @@ let qrURL = null;
 let toastTimer = null;
 let hostRunning = false;
 let viewerWatching = false;
+let viewerListening = false;
+let audioState = { kind: 'idle', message: 'Звук выключен' };
 let viewerLive = false;
 let mediaBusy = false;
 let mediaMessage = '';
@@ -343,6 +345,8 @@ async function releaseRoom() {
   $('latest-photo-panel').hidden = true;
   hostRunning = false;
   viewerWatching = false;
+  viewerListening = false;
+  audioState = { kind: 'idle', message: 'Звук выключен' };
   viewerLive = false;
   mediaBusy = false;
   mediaMessage = '';
@@ -452,6 +456,11 @@ async function openRoom(role, binding, actor = authActor()) {
       }
       renderMedia();
     },
+    onAudioStatus(status) {
+      if (generation !== current) return;
+      audioState = status;
+      renderMedia();
+    },
     onLevel(value) {
       if (generation !== current) return;
       const level = Math.max(0, Math.min(1, value));
@@ -555,15 +564,25 @@ function renderMedia() {
   video.hidden = !isHost || !visible;
   remoteVideo.hidden = isHost || !rtc || !visible;
   $('live-frame').hidden = isHost || rtc || !visible;
-  $('stream-note').textContent = rtc ? 'WebRTC · без прямого звука' : 'WebSocket · до 5 кадров/с · без прямого звука';
+  $('stream-note').textContent = rtc ? 'WebRTC · видео и звук по запросу' : 'WebSocket · видео до 5 кадров/с · звук по запросу';
   $('video-placeholder').hidden = visible;
   $('video-corner').hidden = !visible;
   $('video-corner-text').textContent = isHost ? 'ЛОКАЛЬНЫЙ ПРЕДПРОСМОТР' : 'ПРЯМО СЕЙЧАС';
-  $('video-mode').textContent = visible ? isHost ? 'НАБЛЮДЕНИЕ' : 'В ПРЯМОМ ЭФИРЕ' : mediaBusy ? 'ПОДКЛЮЧЕНИЕ' : 'КАМЕРА ВЫКЛЮЧЕНА';
+  $('video-mode').textContent = visible ? isHost ? 'НАБЛЮДЕНИЕ' : 'В ПРЯМОМ ЭФИРЕ' : mediaBusy ? 'ПОДКЛЮЧЕНИЕ' : !isHost && viewerListening ? 'ТОЛЬКО ЗВУК' : 'КАМЕРА ВЫКЛЮЧЕНА';
   const running = isHost ? hostRunning : viewerWatching;
   $('capture-button').disabled = mediaBusy;
   $('capture-button').querySelector('span').textContent = mediaBusy ? 'Подключаемся…' : isHost ? running ? 'Остановить наблюдение' : 'Включить наблюдение' : running ? 'Выключить видео' : 'Включить видео';
   $('capture-button').querySelector('use').setAttribute('href', running ? '#i-stop' : '#i-play');
+  $('capture-button').setAttribute('aria-pressed', String(running));
+  $('audio-button').hidden = isHost;
+  $('audio-button').disabled = mediaBusy;
+  $('audio-button').setAttribute('aria-pressed', String(viewerListening));
+  $('audio-button').querySelector('span').textContent = viewerListening ? 'Выключить звук' : 'Включить звук';
+  $('audio-status').hidden = isHost;
+  $('audio-status').textContent = viewerListening ? audioState.message || 'Подключаем звук…' : 'Звук выключен';
+  $('audio-status').dataset.state = audioState.kind;
+  $('audio-retry').hidden = isHost || !viewerListening || audioState.kind !== 'blocked';
+  $('audio-retry').disabled = mediaBusy;
   $('video-device').disabled = isHost && (hostRunning || mediaBusy);
   $('audio-device').disabled = isHost && (hostRunning || mediaBusy);
   const microphoneLabel = isHost && video.srcObject?.getAudioTracks()[0]?.label;
@@ -579,9 +598,12 @@ function renderMedia() {
     } else if (room && (!room.online || !room.monitoring)) {
       $('video-placeholder-title').textContent = room.online ? 'Наблюдение на паузе' : 'Устройство питомца не в сети';
       $('video-placeholder-text').textContent = room.online ? 'На домашнем устройстве нужно включить наблюдение.' : 'Проверьте домашний интернет, открытую вкладку и режим сна ноутбука.';
+    } else if (viewerListening && !viewerWatching) {
+      $('video-placeholder-title').textContent = audioState.kind === 'live' ? 'Слушаем дом' : audioState.kind === 'blocked' ? 'Нужно включить воспроизведение' : audioState.kind === 'error' ? 'Звук недоступен' : 'Подключаем звук';
+      $('video-placeholder-text').textContent = 'Видео не передаётся. Можно включить его в любой момент. История шума и фотографии продолжают обновляться.';
     } else {
       $('video-placeholder-title').textContent = viewerWatching ? 'Соединяем вас с домом' : 'Питомец ближе, чем кажется';
-      $('video-placeholder-text').textContent = viewerWatching ? 'Подключаем камеру. Это может занять несколько секунд.' : 'Нажмите «Включить видео», чтобы заглянуть. История доступна и без видео.';
+      $('video-placeholder-text').textContent = viewerWatching ? 'Подключаем камеру. Это может занять несколько секунд.' : 'Включите видео, звук или оба сразу. История доступна и без трансляции.';
     }
     $('media-status').textContent = viewerWatching ? !remoteOnline ? 'Ждём устройство питомца. Подключимся автоматически.' : mediaMessage || 'Соединяемся с домашней камерой' : 'Видео выключено · история продолжает обновляться';
   }
@@ -754,6 +776,7 @@ async function openPhoto(event) {
 
 async function toggleCapture() {
   if (!monitor || mediaBusy) return;
+  if (active.role === 'viewer') return toggleViewerChannel('video');
   const current = generation;
   const currentMonitor = monitor;
   const isHost = active.role === 'host';
@@ -768,14 +791,33 @@ async function toggleCapture() {
         await currentMonitor.startHost({ videoDeviceId: $('video-device').value || undefined, audioDeviceId: $('audio-device').value || undefined, settings: room ? room.settings : DEFAULT_SETTINGS });
         if (generation === current) hostRunning = true;
       }
-    } else {
-      if (viewerWatching) { viewerWatching = false; viewerLive = false; await currentMonitor.stopViewer(); }
-      else { viewerWatching = true; await currentMonitor.startViewer(); }
     }
   } catch (error) {
     if (generation !== current) return;
     if (!isHost) viewerWatching = false;
     showError(error.message || 'Не удалось включить камеру. Проверьте разрешения браузера.');
+  } finally {
+    if (generation === current) { mediaBusy = false; renderMedia(); }
+  }
+}
+
+async function toggleViewerChannel(channel) {
+  if (!monitor || active?.role !== 'viewer' || mediaBusy) return;
+  const current = generation, currentMonitor = monitor;
+  if (channel === 'audio') viewerListening = !viewerListening;
+  else viewerWatching = !viewerWatching;
+  viewerLive = false;
+  mediaBusy = true;
+  showError('');
+  renderMedia();
+  try {
+    if (!viewerWatching && !viewerListening) await currentMonitor.stopViewer();
+    else await currentMonitor.startViewer({ mode: viewerWatching ? viewerListening ? 'audio-video' : 'video' : 'audio' });
+  } catch (error) {
+    if (generation !== current) return;
+    viewerWatching = viewerListening = false;
+    await currentMonitor.stopViewer();
+    showError(error.message || 'Не удалось включить трансляцию.');
   } finally {
     if (generation === current) { mediaBusy = false; renderMedia(); }
   }
@@ -878,6 +920,8 @@ $('viewer-form').addEventListener('submit', async (event) => {
   catch (error) { showError(error.message, true); }
 });
 $('capture-button').addEventListener('click', () => void toggleCapture());
+$('audio-button').addEventListener('click', () => void toggleViewerChannel('audio'));
+$('audio-retry').addEventListener('click', () => { void monitor?.resumeAudio().catch(error => showError(error.message)); });
 $('sensitivity').addEventListener('change', () => { settingsDirty = true; sensitivityDirty = true; $('settings-feedback').textContent = 'Есть несохранённые изменения'; });
 $('snapshot-interval').addEventListener('change', () => { settingsDirty = true; $('settings-feedback').textContent = 'Есть несохранённые изменения'; });
 $('settings-form').addEventListener('submit', async (event) => {
