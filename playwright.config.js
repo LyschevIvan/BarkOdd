@@ -39,7 +39,7 @@ export default defineConfig({
     screenshot: 'only-on-failure',
     launchOptions: browserName === 'chromium' ? {
       executablePath,
-      args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required', `--use-file-for-fake-audio-capture=${audioPath}`],
+      args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${audioPath}`],
     } : {},
   },
 });

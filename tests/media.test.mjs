@@ -48,13 +48,14 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
   const worklets = [];
   const mediaConstraints = [];
   let mediaRequests = 0;
-  let pendingMedia;
+  let pendingMedia, rejectMedia;
   let pendingWake;
   let releasedLocks = 0;
   let heartbeatResponse = () => Promise.resolve();
   let eventResponse = body => Promise.resolve(eventResult(body));
   let snapshotResponse = () => 'data:image/jpeg;base64,/9j/2Q==';
   let resumeResponse = null;
+  let audioPlayResponse = () => Promise.resolve();
   const wakeLock = target({ release() { releasedLocks++; this.dispatchEvent({ type: 'release' }); return Promise.resolve(); } });
   class FrameBlob {
     constructor(parts = [], { type = '' } = {}) { this.size = parts.reduce((size, part) => size + (part.byteLength ?? part.size ?? part.length), 0); this.type = type; }
@@ -115,7 +116,12 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     static now() { return startedAt + time; }
   });
   replace('navigator', {
-    mediaDevices: { getUserMedia: constraints => { mediaRequests++; mediaConstraints.push(constraints); return deferredMedia ? new Promise(resolve => { pendingMedia = resolve; }) : Promise.resolve(stream); } },
+    mediaDevices: { getUserMedia: constraints => {
+      mediaRequests++;
+      mediaConstraints.push(constraints);
+      if (!deferredMedia) return Promise.resolve(stream);
+      return new Promise((resolve, reject) => { pendingMedia = resolve; rejectMedia = reject; });
+    } },
     wakeLock: { request: () => deferredWake ? new Promise(resolve => { pendingWake = resolve; }) : Promise.resolve(wakeLock) },
   });
   replace('AudioContext', AudioContext);
@@ -158,7 +164,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
       assert.ok(name === 'video' || name === 'audio');
       const element = {
         readyState: videoReady ? 4 : 0, videoWidth: videoReady ? 1920 : 0, videoHeight: videoReady ? 1080 : 0,
-        play: () => Promise.resolve(),
+        play: () => name === 'audio' ? audioPlayResponse() : Promise.resolve(),
         pause() {},
       };
       if (name === 'video') videos.push(element);
@@ -214,7 +220,9 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     onEvent(callback) { eventResponse = callback; },
     onSnapshot(callback) { snapshotResponse = callback; },
     onResume(callback) { resumeResponse = callback; },
+    onAudioPlay(callback) { audioPlayResponse = callback; },
     resolveMedia() { pendingMedia(stream); },
+    denyMedia() { rejectMedia(Object.assign(new Error('permission denied'), { name: 'NotAllowedError' })); },
     resolveWake() { pendingWake(wakeLock); },
     releasedLocks: () => releasedLocks,
     timerCount: () => timers.size,
@@ -352,6 +360,53 @@ await test('suspended audio rejects retained samples and recovers when resumed',
     assert.match(env.statuses[env.statuses.length - 1].message, /приостановил|приостановлен/i, 'status must identify suspended audio');
     env.setAudioState('running');
   });
+});
+
+await test('host activates audio during the start click before permission resolves', { deferredMedia: true }, async env => {
+  let inGesture = true;
+  env.onResume(audio => {
+    if (inGesture) return Promise.resolve();
+    audio.state = 'suspended';
+    return new Promise(() => {});
+  });
+  void env.monitor.startHost();
+  inGesture = false;
+  env.resolveMedia();
+  await env.settle();
+  assert.equal(env.posts.find(post => post.path === '/heartbeat')?.body.monitoring, true, 'permission delay must not leave the host without active audio');
+  assert.ok(env.levels.some(level => level > 0));
+});
+
+await test('a pending audio resume exposes the suspended input and leaves host controls available', {}, async env => {
+  let finished = false;
+  env.onResume(audio => {
+    audio.state = 'suspended';
+    return new Promise(() => {});
+  });
+  void env.monitor.startHost().then(() => { finished = true; });
+  await env.settle();
+  assert.equal(finished, true, 'startup must not wait indefinitely for browser audio');
+  assert.equal(env.statuses[env.statuses.length - 1].kind, 'error');
+  assert.match(env.statuses[env.statuses.length - 1].message, /приостановил|приостановлен/i);
+  assert.equal(env.posts.find(post => post.path === '/heartbeat')?.body.monitoring, false);
+  env.setAudioState('running');
+  await env.advance(5000);
+  assert.equal(env.posts.filter(post => post.path === '/heartbeat').pop().body.monitoring, true);
+  assert.equal(env.sockets.length, 1);
+});
+
+await test('denied device permission closes the host audio context while resume is pending', { deferredMedia: true }, async env => {
+  let context;
+  env.onResume(audio => {
+    context = audio;
+    return new Promise(() => {});
+  });
+  const starting = env.monitor.startHost();
+  env.denyMedia();
+  await assert.rejects(starting, /доступ к камере и микрофону/i);
+  assert.equal(env.errors.length, 1);
+  env.errors.length = 0;
+  assert.equal(context?.state, 'closed', 'permission denial must release audio resources opened on click');
 });
 
 
@@ -1083,12 +1138,20 @@ await test('socket error does not hide a terminal close code or restart a revoke
   env.errors.length = 0;
 });
 
-await test('stop during device permission and pending wake lock releases late resources', { deferredMedia: true, deferredWake: true }, async env => {
+await test('stop during device permission closes pending audio and releases late tracks', { deferredMedia: true }, async env => {
+  let context, rejectResume;
+  env.onResume(audio => {
+    context = audio;
+    return new Promise((_, reject) => { rejectResume = reject; });
+  });
   const starting = env.monitor.startHost();
   await env.monitor.stopHost();
   env.resolveMedia();
   await starting;
   assert.ok(env.stream.getTracks().every(track => track.readyState === 'ended'));
+  assert.equal(context?.state, 'closed');
+  rejectResume(new Error('Audio context closed'));
+  await env.settle();
   assert.equal(env.sockets.length, 0, 'cancelled start cannot establish a source');
 });
 
@@ -1291,6 +1354,37 @@ await test('RTC listening remains live after automatic browser audio resume', { 
   env.transitionAudio('suspended');
   assert.equal(env.audioStatuses[env.audioStatuses.length - 1].kind, 'blocked');
   env.transitionAudio('running');
+  await env.advance(500);
+  assert.equal(env.audioStatuses[env.audioStatuses.length - 1].kind, 'live');
+});
+
+await test('a late retry for a replaced RTC track cannot block its replacement', { rtc: true }, async env => {
+  await env.monitor.startViewer({ mode: 'audio' });
+  const socket = env.openSocket('viewer');
+  socket.receive({ type: 'ready', role: 'viewer', mediaTransport: 'webrtc', clientId: 'listener', iceServers: [] });
+  socket.receive({ type: 'source', sourceId: 'host-id', online: true, monitoring: true });
+  const receiveAudio = async connectionId => {
+    socket.receive({ type: 'signal', from: 'host-id', connectionId, signal: { type: 'offer', sdp: 'host-offer' } });
+    await env.settle();
+    let packets = 0;
+    env.peers[env.peers.length - 1].ontrack({
+      track: env.stream.getAudioTracks()[0],
+      receiver: { getStats: async () => new Map([['audio', { type: 'inbound-rtp', kind: 'audio', packetsReceived: ++packets }]]) },
+    });
+    await env.settle();
+  };
+
+  await receiveAudio('audio-one');
+  await env.advance(500);
+  assert.equal(env.audioStatuses[env.audioStatuses.length - 1].kind, 'live');
+  let resolvePlay;
+  env.onAudioPlay(() => new Promise(resolve => { resolvePlay = resolve; }));
+  const retry = env.monitor.resumeAudio();
+  env.onAudioPlay(() => Promise.resolve());
+  await receiveAudio('audio-two');
+  assert.equal(env.audioStatuses[env.audioStatuses.length - 1].kind, 'waiting');
+  resolvePlay();
+  await retry;
   await env.advance(500);
   assert.equal(env.audioStatuses[env.audioStatuses.length - 1].kind, 'live');
 });

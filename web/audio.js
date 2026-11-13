@@ -83,11 +83,39 @@ export async function createAudioCapture({ context, source, onPacket, onError } 
 const PACKET_SECONDS = AUDIO_SAMPLES / AUDIO_SAMPLE_RATE;
 const MAX_BUFFER_SECONDS = 0.5;
 const START_DELAY = 0.01;
+const playbackSessions = new WeakMap();
+
+function acquirePlaybackSession() {
+  try {
+    const session = globalThis.navigator?.audioSession;
+    if (!session) return;
+    let playback = playbackSessions.get(session);
+    if (!playback) {
+      const previousType = session.type;
+      if (previousType === 'playback') return;
+      // Web Audio may otherwise follow the iPhone's Silent mode.
+      session.type = 'playback';
+      playback = { previousType, players: 0 };
+      playbackSessions.set(session, playback);
+    }
+    playback.players++;
+    return () => {
+      if (--playback.players !== 0) return;
+      playbackSessions.delete(session);
+      try {
+        if (session.type === 'playback') session.type = playback.previousType;
+      } catch { /* The browser may no longer expose the session. */ }
+    };
+  } catch { /* AudioSession is optional. */ }
+}
 
 export function createAudioPlayer({ onStatus } = {}) {
   let context = null, closed = false, generation = 0, resumeAttempt = 0;
   let scheduled = [], streamSource = null, streamElement = null, streamPlayAttempt = 0;
+  let streamPlaying = false, streamSetupFailed = false;
   let currentStream = null, lastSequence = null, lastStatus = '';
+  let releaseAudioSession;
+  const releasePlayback = () => { releaseAudioSession?.(); releaseAudioSession = null; };
   const status = (kind, message) => {
     const key = `${kind}:${message}`;
     if (closed || key === lastStatus) return;
@@ -111,19 +139,28 @@ export function createAudioPlayer({ onStatus } = {}) {
     }
     streamElement = null;
     streamSource = null; currentStream = null;
+    streamPlaying = false;
+    streamSetupFailed = false;
   };
   const activateStream = () => {
     const element = streamElement;
     if (!element) return Promise.resolve(true);
     const token = generation, attempt = ++streamPlayAttempt;
     const current = () => !closed && generation === token && streamElement === element && streamPlayAttempt === attempt;
-    let result;
-    try { result = element.play(); }
-    catch (error) { if (current()) blocked(); return Promise.resolve(false); }
-    return Promise.resolve(result).then(() => current(), () => {
-      if (current()) blocked();
+    const playFailed = () => {
+      if (current()) { streamPlaying = false; blocked(); }
       return false;
-    });
+    };
+    let result;
+    if (!streamPlaying) blocked();
+    try { result = element.play(); }
+    catch (error) { return Promise.resolve(playFailed()); }
+    return Promise.resolve(result).then(() => {
+      if (!current()) return false;
+      streamPlaying = true;
+      if (context.state === 'running') waiting();
+      return true;
+    }, playFailed);
   };
   const reset = () => {
     generation++; resumeAttempt++; lastSequence = null;
@@ -133,14 +170,19 @@ export function createAudioPlayer({ onStatus } = {}) {
     const Audio = globalThis.AudioContext || globalThis.webkitAudioContext;
     if (!Audio) throw new Error('Этот браузер не поддерживает воспроизведение звука.');
     // Construct immediately, before any await, to retain the click's activation.
+    releaseAudioSession = acquirePlaybackSession();
     context = new Audio();
     context.onstatechange = () => {
       if (closed) return;
-      if (context.state === 'running') waiting();
-      else if (context.state === 'closed') { reset(); status('error', 'Воспроизведение звука остановлено браузером.'); }
+      if (context.state === 'closed') {
+        reset(); releasePlayback();
+        status('error', 'Воспроизведение звука остановлено браузером.');
+      }
+      else if (streamSetupFailed) return;
+      else if (context.state === 'running') { if (!streamElement || streamPlaying) waiting(); }
       else { clearPCM(); blocked(); }
     };
-  } catch (error) { status('error', error.message); }
+  } catch (error) { releasePlayback(); status('error', error.message); }
 
   const schedule = (samples, start) => {
     const buffer = context.createBuffer(1, AUDIO_SAMPLES, AUDIO_SAMPLE_RATE);
@@ -160,7 +202,7 @@ export function createAudioPlayer({ onStatus } = {}) {
 
   return {
     resume() {
-      if (closed || !context || context.state === 'closed') return Promise.resolve(false);
+      if (closed || !context || context.state === 'closed' || streamSetupFailed) return Promise.resolve(false);
       const token = generation, attempt = ++resumeAttempt;
       const current = () => !closed && token === generation && attempt === resumeAttempt;
       let result;
@@ -171,11 +213,11 @@ export function createAudioPlayer({ onStatus } = {}) {
       // of rejecting it. Keep the retry action available during that wait.
       if (context.state !== 'running') blocked();
       return Promise.all([result, decoding]).then(([, decoderReady]) => {
-        if (!current()) return false;
-        if (!decoderReady) return false;
+        if (!current() || streamSetupFailed) return false;
+        if (!decoderReady || (streamElement && !streamPlaying)) return false;
         if (context.state !== 'running') { blocked(); return false; }
         waiting(); return true;
-      }, () => { if (current()) blocked(); return false; });
+      }, () => { if (current() && !streamSetupFailed) blocked(); return false; });
     },
     enqueue(packet) {
       if (closed || !context || context.state === 'closed') return false;
@@ -206,7 +248,7 @@ export function createAudioPlayer({ onStatus } = {}) {
       }
     },
     setStream(stream) {
-      if (closed || !context || context.state === 'closed' || currentStream === stream) return;
+      if (closed || !context || context.state === 'closed' || (!streamSetupFailed && currentStream === stream)) return;
       clearPCM(); disconnectStream(); lastSequence = null;
       if (!stream) return;
       try {
@@ -222,7 +264,11 @@ export function createAudioPlayer({ onStatus } = {}) {
         streamSource.connect(context.destination); currentStream = stream;
         void activateStream();
         if (context.state !== 'running') blocked();
-      } catch (error) { disconnectStream(); status('error', 'Не удалось воспроизвести звук трансляции.'); }
+      } catch (error) {
+        disconnectStream();
+        streamSetupFailed = true;
+        status('error', 'Не удалось воспроизвести звук трансляции.');
+      }
     },
     reset,
     close() {
@@ -232,6 +278,7 @@ export function createAudioPlayer({ onStatus } = {}) {
         context.onstatechange = null;
         try { Promise.resolve(context.close()).catch(() => {}); } catch { /* Already closed. */ }
       }
+      releasePlayback();
     },
   };
 }

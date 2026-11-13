@@ -14,7 +14,7 @@ const packet = (sequence, amplitude = 0.25) => encodeAudioPacket(new Float32Arra
 function browser({ state = 'running' } = {}) {
   const originals = new Map(), contexts = [], worklets = [], elements = [];
   const replace = (name, value) => {
-    originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+    if (!originals.has(name)) originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
     Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
   };
   class Node {
@@ -58,7 +58,7 @@ function browser({ state = 'running' } = {}) {
     };
     elements.push(element); return element;
   } });
-  return { Context, Node, contexts, worklets, elements,
+  return { Context, Node, contexts, worklets, elements, replace,
     restore() { for (const [name, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name]; } },
   };
 }
@@ -286,6 +286,147 @@ test('late decoder play rejection cannot change status after reset or stream rep
     reject(new Error('cancelled old decoder'));
     assert.equal(await pending, false); assert.equal(statuses.length, statusCount);
     player.setStream({}); player.close(); await tick(); assert.equal(statuses.length, statusCount);
+  } finally { env.restore(); }
+});
+
+test('a running AudioContext keeps the retry available until the RTC decoder plays', async () => {
+  const env = browser({ state: 'suspended' });
+  try {
+    const statuses = [], player = createAudioPlayer({ onStatus: status => statuses.push(status) }), context = env.contexts[0];
+    player.setStream({});
+    const decoder = env.elements[0];
+    decoder.playBehavior = () => Promise.reject(new Error('NotAllowedError'));
+    context.resumeBehavior = () => Promise.resolve();
+    assert.equal(await player.resume(), false);
+    assert.equal(statuses[statuses.length - 1].kind, 'blocked');
+    context.transition('running');
+    assert.equal(statuses[statuses.length - 1].kind, 'blocked');
+    let completePlay;
+    decoder.playBehavior = () => new Promise(resolve => { completePlay = resolve; });
+    const retry = player.resume();
+    assert.equal(statuses[statuses.length - 1].kind, 'blocked');
+    completePlay();
+    assert.equal(await retry, true);
+    assert.equal(statuses[statuses.length - 1].kind, 'waiting');
+    player.close();
+  } finally { env.restore(); }
+});
+
+test('a pending AudioContext resume cannot clear a later RTC decoder rejection', async () => {
+  const env = browser({ state: 'suspended' });
+  try {
+    const statuses = [], player = createAudioPlayer({ onStatus: status => statuses.push(status) }), context = env.contexts[0];
+    let completeResume;
+    context.resumeBehavior = () => new Promise(resolve => { completeResume = resolve; });
+    const first = player.resume();
+    const createElement = document.createElement;
+    document.createElement = name => {
+      const decoder = createElement(name);
+      decoder.playBehavior = () => Promise.reject(new Error('NotAllowedError'));
+      return decoder;
+    };
+    player.setStream({});
+    await tick();
+    context.transition('running'); completeResume();
+    assert.equal(await first, false);
+    assert.equal(statuses[statuses.length - 1].kind, 'blocked');
+    player.close();
+  } finally { env.restore(); }
+});
+
+test('a pending RTC decoder keeps playback retry available even with a running AudioContext', async () => {
+  const env = browser();
+  try {
+    const statuses = [], player = createAudioPlayer({ onStatus: status => statuses.push(status) });
+    let rejectPlay;
+    const createElement = document.createElement;
+    document.createElement = name => {
+      const decoder = createElement(name);
+      decoder.playBehavior = () => new Promise((resolve, reject) => { rejectPlay = reject; });
+      return decoder;
+    };
+    await player.resume();
+    player.setStream({});
+    assert.equal(statuses[statuses.length - 1].kind, 'blocked');
+    await tick();
+    assert.equal(statuses[statuses.length - 1].kind, 'blocked');
+    rejectPlay(new Error('NotAllowedError'));
+    await tick();
+    assert.equal(statuses[statuses.length - 1].kind, 'blocked');
+    env.elements[0].playBehavior = null;
+    assert.equal(await player.resume(), true);
+    assert.equal(statuses[statuses.length - 1].kind, 'waiting');
+    player.close();
+  } finally { env.restore(); }
+});
+
+test('RTC graph setup error persists through AudioContext resume', async () => {
+  const env = browser({ state: 'suspended' });
+  try {
+    const statuses = [], player = createAudioPlayer({ onStatus: status => statuses.push(status) }), context = env.contexts[0];
+    context.createMediaStreamSource = () => { throw new Error('RTC source unavailable'); };
+    player.setStream({});
+    assert.equal(statuses[statuses.length - 1].kind, 'error');
+    context.transition('running');
+    assert.equal(statuses[statuses.length - 1].kind, 'error');
+    assert.equal(await player.resume(), false);
+    assert.equal(statuses[statuses.length - 1].kind, 'error');
+    player.close();
+  } finally { env.restore(); }
+});
+
+test('audio playback selects the playback session before opening AudioContext and restores it after the last player', () => {
+  const env = browser();
+  try {
+    const session = { type: 'auto' };
+    env.replace('navigator', { audioSession: session });
+    env.replace('AudioContext', class extends env.Context {
+      constructor() { assert.equal(session.type, 'playback'); super(); }
+    });
+    const first = createAudioPlayer(), second = createAudioPlayer();
+    assert.equal(session.type, 'playback');
+    first.close(); assert.equal(session.type, 'playback');
+    second.close(); assert.equal(session.type, 'auto');
+  } finally { env.restore(); }
+});
+
+test('closing the player preserves an audio session type changed elsewhere', () => {
+  const env = browser();
+  try {
+    const session = { type: 'ambient' };
+    env.replace('navigator', { audioSession: session });
+    const player = createAudioPlayer();
+    assert.equal(session.type, 'playback');
+    session.type = 'play-and-record';
+    player.close(); assert.equal(session.type, 'play-and-record');
+  } finally { env.restore(); }
+});
+
+test('failed AudioContext setup releases the playback session', () => {
+  const env = browser();
+  try {
+    const session = { type: 'auto' };
+    env.replace('navigator', { audioSession: session });
+    let typeAtSetup;
+    env.replace('AudioContext', class {
+      constructor() { typeAtSetup = session.type; throw new Error('AudioContext unavailable'); }
+    });
+    const statuses = [], player = createAudioPlayer({ onStatus: status => statuses.push(status) });
+    assert.equal(typeAtSetup, 'playback');
+    assert.equal(session.type, 'auto');
+    assert.equal(statuses[statuses.length - 1].kind, 'error');
+    player.close();
+  } finally { env.restore(); }
+});
+
+test('a rejected AudioSession setting leaves audio playback usable', async () => {
+  const env = browser();
+  try {
+    env.replace('navigator', { audioSession: { get type() { return 'auto'; }, set type(_) { throw new Error('unsupported'); } } });
+    const player = createAudioPlayer();
+    assert.equal(await player.resume(), true);
+    assert.equal(player.enqueue(packet(1)), true);
+    player.close();
   } finally { env.restore(); }
 });
 

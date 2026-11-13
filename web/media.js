@@ -425,7 +425,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
   }
 
   function audioInputIssue(state) {
-    if (state.audio.state !== 'running') return 'Браузер приостановил обработку звука. Вернитесь к вкладке устройства питомца.';
+    if (state.audio.state !== 'running') return 'Браузер приостановил обработку звука. Вернитесь к вкладке устройства питомца. Если звук не восстановится, остановите и снова включите наблюдение.';
     const tracks = state.stream.getAudioTracks().filter(track => track.readyState === 'live');
     if (!tracks.length) return 'Микрофон недоступен. Проверьте подключение и запустите наблюдение снова.';
     const enabled = tracks.filter(track => track.enabled);
@@ -546,6 +546,9 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
       if (!globalThis.WebSocket) throw new Error('Этот браузер не поддерживает видеотрансляцию через WebSocket.');
       const Audio = globalThis.AudioContext || globalThis.webkitAudioContext;
       if (!Audio) throw new Error('Этот браузер не поддерживает обработку звука.');
+      // Resume during the start click, before device permission can consume activation.
+      state.audio = new Audio();
+      void state.audio.resume().catch(error => { if (state.active) report(error); });
       const camera = videoDeviceId ? { deviceId: { exact: videoDeviceId } }
         : videoFacingMode ? { facingMode: { exact: videoFacingMode } } : {};
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -561,14 +564,15 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
       state.video.srcObject = stream;
       state.canvas = document.createElement('canvas');
       state.liveCanvas = document.createElement('canvas');
-      state.audio = new Audio();
       state.source = state.audio.createMediaStreamSource(stream);
       state.analyser = state.audio.createAnalyser();
       state.analyser.fftSize = 2048;
       state.analyser.smoothingTimeConstant = 0;
       state.samples = new Float32Array(state.analyser.fftSize);
       state.source.connect(state.analyser);
-      await Promise.all([state.audio.resume(), state.video.play()]);
+      // A blocked resume can remain pending. Sampling reports the suspension
+      // and keeps the source offline while the user can still stop observation.
+      await state.video.play();
       if (!state.active) return;
       for (const track of stream.getTracks()) {
         track.onended = () => {
@@ -676,9 +680,8 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     if (!state?.active || !state.player) return;
     const revision = state.audioRevision || 0;
     const resumed = await state.player.resume();
-    if (!state.active || revision !== (state.audioRevision || 0)) return;
-    state.outputBlocked = !resumed;
-    if (resumed) audioStatus(state, state.audioReceived ? 'live' : 'connecting', state.audioReceived ? 'Слушаем звук дома' : 'Ожидаем звук с устройства питомца…');
+    if (!resumed || !state.active || revision !== (state.audioRevision || 0)) return;
+    audioStatus(state, state.audioReceived ? 'live' : 'connecting', state.audioReceived ? 'Слушаем звук дома' : 'Ожидаем звук с устройства питомца…');
   }
 
   function updateSettings(settings) {

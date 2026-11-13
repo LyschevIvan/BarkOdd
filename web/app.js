@@ -4,6 +4,12 @@ import { DEFAULT_NOISE_THRESHOLD } from './noise.js';
 const APP_BASE = new URL('./', import.meta.url);
 
 const $ = (id) => document.getElementById(id);
+// Media updates can arrive between pointerdown and pointerup. Replacing an
+// unchanged label's text node can cancel the click in WebKit.
+const setButtonLabel = (id, text) => {
+  const label = $(id).querySelector('span');
+  if (label.textContent !== text) label.textContent = text;
+};
 const GUEST_STORAGE_KEY = 'barkodd.guest.v2';
 let auth = { mode: null, user: null };
 let authTimer = null;
@@ -766,13 +772,13 @@ function renderMedia() {
   $('video-mode').textContent = visible ? isHost ? 'НАБЛЮДЕНИЕ' : 'В ПРЯМОМ ЭФИРЕ' : mediaBusy ? 'ПОДКЛЮЧЕНИЕ' : !isHost && viewerListening ? 'ТОЛЬКО ЗВУК' : 'КАМЕРА ВЫКЛЮЧЕНА';
   const running = isHost ? hostRunning : viewerWatching;
   $('capture-button').disabled = mediaBusy;
-  $('capture-button').querySelector('span').textContent = mediaBusy ? 'Подключаемся…' : isHost ? running ? 'Остановить наблюдение' : 'Включить наблюдение' : running ? 'Выключить видео' : 'Включить видео';
+  setButtonLabel('capture-button', mediaBusy ? 'Подключаемся…' : isHost ? running ? 'Остановить наблюдение' : 'Включить наблюдение' : running ? 'Выключить видео' : 'Включить видео');
   $('capture-button').querySelector('use').setAttribute('href', running ? '#i-stop' : '#i-play');
   $('capture-button').setAttribute('aria-pressed', String(running));
   $('audio-button').hidden = isHost;
   $('audio-button').disabled = mediaBusy;
   $('audio-button').setAttribute('aria-pressed', String(viewerListening));
-  $('audio-button').querySelector('span').textContent = viewerListening ? 'Выключить звук' : 'Включить звук';
+  setButtonLabel('audio-button', viewerListening ? 'Выключить звук' : 'Включить звук');
   $('audio-status').hidden = isHost;
   $('audio-status').textContent = viewerListening ? audioState.message || 'Подключаем звук…' : 'Звук выключен';
   $('audio-status').dataset.state = audioState.kind;
