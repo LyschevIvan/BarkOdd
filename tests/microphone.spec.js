@@ -28,7 +28,7 @@ async function syntheticMicrophone(page, amplitude = 0.2) {
       draw();
       const stream = canvas.captureStream(10);
       stream.addTrack(destination.stream.getAudioTracks()[0]);
-      window.__syntheticMicrophone = { audio, stream };
+      window.__syntheticMicrophone = { audio, stream, gain };
       return stream;
     };
   }, amplitude);
@@ -63,6 +63,42 @@ async function saveSettings(page, url) {
   expect((await saved).ok()).toBe(true);
   await expect(page.locator('#save-settings')).toBeEnabled();
 }
+
+test('continued sound saves separate photos at the minimum interval and silence saves none', async ({ page, baseURL }) => {
+  await syntheticMicrophone(page);
+  const { url, state } = await createHost(page, baseURL, 'Continuous photo interval');
+  await page.locator('#snapshot-interval').selectOption('10000');
+  await saveSettings(page, url);
+  try {
+    await page.locator('#capture-button').click();
+    await expect.poll(async () => (await state()).events.filter(event => event.hasPhoto).length).toBe(1);
+    const first = (await state()).events[0];
+    await expect.poll(async () => (await state()).events.filter(event => event.hasPhoto).length).toBe(2);
+    const second = (await state()).events[0];
+    expect(second.id).not.toBe(first.id);
+    expect(Date.parse(second.photoAt) - Date.parse(first.photoAt)).toBeGreaterThanOrEqual(10000);
+    expect((await state()).events.find(event => event.id === first.id).photoAt).toBe(first.photoAt);
+    await expect(page.locator('.event-card')).toHaveCount(2);
+
+    const quietAt = await page.evaluate(() => {
+      window.__syntheticMicrophone.gain.gain.value = 0;
+      return window.__syntheticMicrophone.audio.currentTime;
+    });
+    await expect.poll(() => page.evaluate(() => window.__syntheticMicrophone.audio.currentTime)).toBeGreaterThan(quietAt + 1.5);
+    const quiet = await state();
+    await expect.poll(() => page.evaluate(() => window.__syntheticMicrophone.audio.currentTime)).toBeGreaterThan(quietAt + 12);
+    expect((await state()).events).toEqual(quiet.events);
+    expect((await state()).lastNoiseAt).toBe(quiet.lastNoiseAt);
+    await page.evaluate(() => { window.__syntheticMicrophone.gain.gain.value = 0.2; });
+    await expect.poll(async () => (await state()).events.filter(event => event.hasPhoto).length).toBe(3);
+    const third = (await state()).events[0];
+    expect(Date.parse(third.photoAt) - Date.parse(second.photoAt)).toBeGreaterThanOrEqual(10000);
+  } finally {
+    await page.locator('#capture-button').click();
+    await page.evaluate(() => window.__syntheticMicrophone.audio.close());
+    await page.request.delete(url);
+  }
+});
 
 test('microphone levels and disabled-input recovery work with a real Web Audio graph', async ({ page, baseURL }) => {
   await syntheticMicrophone(page);

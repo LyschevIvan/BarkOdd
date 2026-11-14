@@ -20,7 +20,6 @@ export class NoiseDetector {
     this.minNoiseMs = bounded(minNoiseMs, 150, 0, 10000);
     this.updateSettings({ threshold, quietMs, snapshotIntervalMs });
     this.candidateAt = null;
-    this.candidateAfterQuiet = false;
     this.lastAboveAt = null;
     this.episode = null;
     this.lastEpisodeAt = -Infinity;
@@ -54,20 +53,15 @@ export class NoiseDetector {
       return null;
     }
     this.lastAboveAt = now;
-    if (this.candidateAt === null) {
-      this.candidateAt = now;
-      this.candidateAfterQuiet = afterQuiet;
-    }
-    if (now - this.candidateAt < this.minNoiseMs) return null;
-    // Decide only when the burst qualifies: a late photo confirmation during
-    // silence can extend the interval and keep this burst in the previous card.
+    if (this.candidateAt === null) this.candidateAt = now;
+    if (now - this.candidateAt < this.minNoiseMs || now - this.lastEmitAt < 1000) return null;
+    // Start the next card with a qualified update after the interval, even
+    // if the sound continues. A photo confirmation can extend that interval.
     const intervalStartedAt = Math.max(this.lastEpisodeAt, this.lastPhotoAt);
-    if (!this.episode || (this.candidateAfterQuiet && now - intervalStartedAt >= this.snapshotIntervalMs)) {
+    if (!this.episode || now - intervalStartedAt >= this.snapshotIntervalMs) {
       this.episode = episodeId();
       this.lastEpisodeAt = now;
     }
-    this.candidateAfterQuiet = false;
-    if (now - this.lastEmitAt < 1000) return null;
     const takePhoto = now - this.lastPhotoAt >= this.snapshotIntervalMs;
     this.lastEmitAt = now;
     return { episodeId: this.episode, takePhoto };

@@ -154,7 +154,7 @@ for (const burstAt of [14999, 15000]) {
   });
 }
 
-test('photo cooldown allows a later photo during continuous noise without losing updates', () => {
+test('continuous noise starts the next card with a photo after the interval', () => {
   const detector = make();
   const events = [];
   for (let time = 0; time <= 31150; time += 50) {
@@ -163,8 +163,24 @@ test('photo cooldown allows a later photo during continuous noise without losing
     if (event?.takePhoto) detector.photoCaptured(time);
   }
   assert.equal(events.length, 32);
-  assert.equal(new Set(events.map(event => event.episodeId)).size, 1);
+  assert.equal(new Set(events.slice(0, 30).map(event => event.episodeId)).size, 1);
+  assert.notEqual(events[30].episodeId, events[0].episodeId);
+  assert.equal(events[31].episodeId, events[30].episodeId);
   assert.deepEqual(events.filter(event => event.takePhoto).map(event => event.time), [150, 30150]);
+});
+
+test('a burst that starts before the photo is due opens a new card when the interval elapses', () => {
+  const detector = make({ snapshotIntervalMs: 10000 });
+  detector.process(0.2, 0);
+  const first = detector.process(0.2, 150);
+  detector.photoCaptured(150);
+  detector.process(0, 200);
+  detector.process(0.2, 9000);
+  assert.deepEqual(detector.process(0.2, 9150), { episodeId: first.episodeId, takePhoto: false });
+  assert.equal(detector.process(0.2, 10100), null);
+  const next = detector.process(0.2, 10150);
+  assert.notEqual(next.episodeId, first.episodeId);
+  assert.equal(next.takePhoto, true);
 });
 
 test('short silences preserve the episode and cannot bypass the event throttle', () => {

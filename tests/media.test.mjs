@@ -559,10 +559,11 @@ await test('confirming an older in-flight photo keeps a newer captured photo pen
   finish();
   env.onEvent(body => Promise.resolve(eventResult(body)));
   await env.settle();
-  await env.advance(500);
-  const uploads = env.posts.filter(post => post.path === '/events');
+  await env.advance(1000);
+  const uploads = env.posts.filter(post => post.path === '/events' && post.body.photo);
   assert.equal(uploads.length, 2);
   assert.ok(uploads[1].body.photo);
+  assert.notEqual(uploads[1].body.episodeId, uploads[0].body.episodeId);
   assert.ok(Date.parse(uploads[1].body.photoAt) > Date.parse(uploads[0].body.photoAt));
 });
 
@@ -618,10 +619,11 @@ for (const rejection of [
     finish();
     env.onEvent(body => Promise.resolve(eventResult(body)));
     await env.settle();
-    await env.advance(500);
-    const uploads = env.posts.filter(post => post.path === '/events');
+    await env.advance(1000);
+    const uploads = env.posts.filter(post => post.path === '/events' && post.body.photo);
     assert.equal(uploads.length, 2);
     assert.ok(uploads[1].body.photo);
+    assert.notEqual(uploads[1].body.episodeId, uploads[0].body.episodeId);
     assert.equal(uploads[1].body.photo, uploads[0].body.photo, 'a static camera may produce the same JPEG for distinct captures');
     assert.ok(Date.parse(uploads[1].body.photoAt) > Date.parse(uploads[0].body.photoAt), 'the response must only discard the submitted capture timestamp');
   });
