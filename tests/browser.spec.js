@@ -188,6 +188,49 @@ test('opening a photo survives a history update while the photo is loading', asy
   } finally { releasePhoto(); await context.close(); }
 });
 
+test('noise updates within a minute keep the displayed photo and its controls stable', async ({ page, baseURL }) => {
+  await loginOwner(page);
+  const headers = { Origin: new URL(baseURL).origin };
+  const created = await page.request.post(new URL('api/rooms', baseURL).href, { headers, data: { name: 'Stable minute photo' } });
+  expect(created.status()).toBe(201);
+  const binding = await created.json();
+  const url = roomURL(baseURL, binding.id);
+  expect((await page.request.put(`${url}/settings`, { headers, data: { threshold: 0.01, snapshotIntervalMs: 60000 } })).status()).toBe(200);
+  const sessionId = 'stable-photo-session';
+  expect((await page.request.post(`${url}/heartbeat`, { headers, data: { sessionId, monitoring: true } })).status()).toBe(200);
+  const photo = await page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 16;
+    return canvas.toDataURL('image/jpeg');
+  });
+  const detectedAt = new Date(Date.now() - 20000).toISOString();
+  const seed = await page.request.post(`${url}/events`, { headers, data: { sessionId, episodeId: 'continuous', photo, photoAt: detectedAt, detectedAt, level: 0.3 } });
+  expect(seed.status()).toBe(200);
+  const first = await seed.json();
+  await page.goto(new URL(`?role=viewer#room=${binding.id}&key=${binding.viewerToken}`, baseURL).href);
+  await expect(page.locator('#latest-photo')).toBeVisible();
+  await expect(page.locator('.event-photo-button img')).toBeVisible();
+  const firstDetail = await page.locator('.event-detail').first().textContent();
+  const firstSrc = await page.locator('#latest-photo').getAttribute('src');
+  await page.locator('.event-photo-button').focus();
+  await page.evaluate(() => {
+    window.__photoChanges = [];
+    window.__photoObserver = new MutationObserver(changes => window.__photoChanges.push(...changes.map(change => change.attributeName)));
+    window.__photoObserver.observe(document.querySelector('#latest-photo'), { attributes: true, attributeFilter: ['src', 'hidden'] });
+  });
+
+  // Submit a second JPEG deliberately: the server must retain the first during
+  // the minute, while the UI updates the sound time without flashing that JPEG.
+  const update = await page.request.post(`${url}/events`, { headers, data: { sessionId, episodeId: 'continuous', photo, level: 0.4 } });
+  expect(update.status()).toBe(200);
+  expect((await update.json()).photoAt).toBe(first.photoAt);
+  await expect(page.locator('.event-detail').first()).not.toHaveText(firstDetail);
+  await expect(page.locator('#last-noise-value')).toHaveText('Только что');
+  await expect(page.locator('#latest-photo')).toHaveAttribute('src', firstSrc);
+  expect(await page.evaluate(() => window.__photoChanges)).toEqual([]);
+  await expect(page.locator('.event-photo-button')).toBeFocused();
+});
+
 test('noise bursts within the photo interval update one photographed history event', async ({ page, baseURL }) => {
   await loginOwner(page);
   await page.locator('#choose-host').click();

@@ -907,12 +907,21 @@ function textElement(tag, className, value) {
 
 function renderHistory() {
   const events = room.events || [];
-  const signature = JSON.stringify(events) + ':' + historyLimit;
-  if (signature === historySignature) return;
+  const visible = events.slice(0, historyLimit);
+  // A noise update does not mean a new photo. Keep the loaded images and
+  // focused controls in place while updating only the sound timestamps.
+  const signature = JSON.stringify(events.map(({ lastNoiseAt, level, ...event }) => event)) + ':' + historyLimit;
+  if (signature === historySignature) {
+    [...$('event-history').children].forEach((card, index) => {
+      const detail = card.querySelector('.event-last-noise');
+      const text = `Последний звук: ${fullDate(visible[index].lastNoiseAt)}`;
+      if (detail.textContent !== text) detail.textContent = text;
+    });
+    return;
+  }
   historySignature = signature;
   const current = generation;
   const epoch = ++photoEpoch;
-  const visible = events.slice(0, historyLimit);
   const last = events.find((event) => event.hasPhoto);
   if (dialogPhotoKey && !events.some(event => event.hasPhoto && photoKey(event) === dialogPhotoKey)) {
     $('photo-dialog').close();
@@ -955,7 +964,7 @@ function renderHistory() {
     const date = textElement('time', 'event-date', shortDate(event.startedAt));
     date.dateTime = event.startedAt;
     date.title = fullDate(event.startedAt);
-    const detail = textElement('span', 'event-detail', `Последний звук: ${fullDate(event.lastNoiseAt)}`);
+    const detail = textElement('span', 'event-detail event-last-noise', `Последний звук: ${fullDate(event.lastNoiseAt)}`);
     info.append(title, date, detail);
     if (event.hasPhoto && event.photoAt) info.append(textElement('span', 'event-detail', `Фото: ${fullDate(event.photoAt)}`));
     card.append(info);
