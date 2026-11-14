@@ -151,6 +151,16 @@
     <footer class="site-footer"><span>BarkOdd<span class="brand-dot">.</span></span><span>Для тех, кто ждёт вас дома.</span><span class="footer-paw"><svg class="icon"><use href="#i-paw"/></svg></span></footer>
   </div>
   <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="clear-history-dialog" class="confirm-dialog" aria-labelledby="clear-history-title" aria-describedby="clear-history-description">
+    <form method="dialog">
+      <h2 id="clear-history-title">Очистить историю?</h2>
+      <p id="clear-history-description">Все шумные моменты и фотографии этой камеры будут удалены. Наблюдение продолжится. Это действие нельзя отменить.</p>
+      <div class="confirm-dialog-actions">
+        <button id="cancel-clear-history" class="button button-secondary" value="cancel" autofocus>Отмена</button>
+        <button id="confirm-clear-history" class="button button-primary" value="clear">Очистить историю</button>
+      </div>
+    </form>
+  </dialog>
   <dialog id="photo-dialog" class="photo-dialog"><button id="close-photo" class="button button-icon dialog-close" aria-label="Закрыть фото"><svg class="icon"><use href="#i-close"/></svg></button><img id="dialog-photo" alt="Фотография во время шумового события"><p id="dialog-photo-caption"></p></dialog>
 </body>
 </html>

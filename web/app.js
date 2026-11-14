@@ -43,6 +43,7 @@ let mediaMessage = '';
 let serverReachable = true;
 let historySignature = '';
 let historyLimit = 12;
+let confirmingHistory = false;
 let clearingHistory = false;
 let settingsLoaded = false;
 let settingsDirty = false;
@@ -455,6 +456,7 @@ async function releaseRoom() {
   $('remote-video').hidden = true;
   mediaTransport = 'websocket';
   clearLiveFrame();
+  if ($('clear-history-dialog').open) $('clear-history-dialog').close('cancel');
   $('photo-dialog').close();
   $('dialog-photo').removeAttribute('src');
   dialogPhotoKey = null;
@@ -724,10 +726,22 @@ function renderTimes() {
 }
 
 async function clearHistory() {
-  if (!active?.binding.account || !api || clearingHistory) return;
-  if (!window.confirm('Очистить все шумные моменты и фотографии этой камеры? Наблюдение продолжится. Это действие нельзя отменить.')) return;
+  const dialog = $('clear-history-dialog');
+  if (!active?.binding.account || !api || confirmingHistory || clearingHistory) return;
   const current = generation;
   const currentAPI = api;
+  // Native confirm pauses media callbacks and heartbeats while it is open.
+  // Keep capture and playback running while the owner decides.
+  confirmingHistory = true;
+  let confirmed;
+  try {
+    confirmed = await new Promise(resolve => {
+      dialog.returnValue = 'cancel';
+      dialog.addEventListener('close', () => resolve(dialog.returnValue === 'clear'), { once: true });
+      dialog.showModal();
+    });
+  } finally { confirmingHistory = false; }
+  if (!confirmed || current !== generation) return;
   clearingHistory = true;
   roomPollSequence += 1;
   clearTimeout(pollTimer);
@@ -993,7 +1007,7 @@ async function openPhoto(event) {
   const current = generation;
   const key = photoKey(event);
   const url = await fetchPhoto(event);
-  if (current !== generation || !room?.events?.some(item => item.hasPhoto && photoKey(item) === key)) return;
+  if (current !== generation || confirmingHistory || !room?.events?.some(item => item.hasPhoto && photoKey(item) === key)) return;
   if (!url) { toast('Фото не загрузилось. Попробуйте ещё раз.'); return; }
   $('dialog-photo').src = url;
   dialogPhotoKey = key;

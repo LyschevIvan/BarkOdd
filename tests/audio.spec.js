@@ -256,3 +256,46 @@ test(`${transport}: sound alone, combined channels, switching, reconnect and rev
     await page.request.delete(new URL(`api/rooms/${binding.id}`, baseURL).href);
   }
 });
+
+test(`${transport}: history confirmation keeps live sound running`, async ({ browser, page, baseURL }) => {
+  const { context, viewer, binding } = await setup(browser, page, baseURL);
+  const roomURL = new URL(`api/rooms/${binding.id}`, baseURL).href;
+  const nextHeartbeat = () => page.waitForResponse(response => response.url() === `${roomURL}/heartbeat` && response.ok());
+  const dialog = page.locator('#clear-history-dialog');
+  try {
+    await viewer.locator('#audio-button').click();
+    await expectSound(viewer);
+    await expect(page.locator('#clear-history')).toBeEnabled();
+    const { historyVersion } = await (await nextHeartbeat()).json();
+
+    await page.locator('#clear-history').click();
+    await expect(dialog).toBeVisible();
+    await page.locator('#cancel-clear-history').click();
+    await expect(dialog).toBeHidden();
+    expect((await (await nextHeartbeat()).json()).historyVersion).toBe(historyVersion);
+
+    await page.locator('#clear-history').click();
+    await expect(dialog).toBeVisible();
+    // Hold the dialog beyond the six-second WebRTC lease. A blocking prompt
+    // used to prevent the host from processing updates and stop the audio.
+    await new Promise(resolve => setTimeout(resolve, 8000));
+    await expectSound(viewer);
+    await expect(dialog).toBeVisible();
+    const cleared = page.waitForResponse(response => response.url() === `${roomURL}/events` && response.request().method() === 'DELETE');
+    const clearingStartedAt = Date.now();
+    await page.locator('#confirm-clear-history').click();
+    const result = await cleared;
+    expect(result.ok()).toBe(true);
+    expect((await result.json()).historyVersion).toBe(historyVersion + 1);
+    await expect(dialog).toBeHidden();
+    await expectSound(viewer);
+    await expect.poll(async () => {
+      const state = await (await page.request.get(roomURL)).json();
+      return state.events.some(event => Date.parse(event.lastNoiseAt) > clearingStartedAt);
+    }).toBe(true);
+  } finally {
+    await context.close();
+    await page.evaluate(() => window.__syntheticAudio?.close());
+    await page.request.delete(roomURL);
+  }
+});

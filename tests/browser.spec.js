@@ -107,13 +107,18 @@ test('history clear keeps monitoring, new starts reset history, and the latest p
     await guest.locator('#latest-photo-button').click();
     await expect(guest.locator('#photo-dialog')).toBeVisible();
 
-    page.once('dialog', dialog => dialog.dismiss());
     await page.locator('#clear-history').click();
+    await page.locator('#cancel-clear-history').click();
+    expect((await state()).events).toHaveLength(1);
+    await page.locator('#clear-history').click();
+    await expect(page.locator('#clear-history-dialog')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#clear-history-dialog')).toBeHidden();
     expect((await state()).events).toHaveLength(1);
     const clearRoute = roomURL(baseURL, binding.id, '/events');
     await page.route(clearRoute, route => route.request().method() === 'DELETE' ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'Проверка ошибки очистки' }) }) : route.continue());
-    page.once('dialog', dialog => dialog.accept());
     await page.locator('#clear-history').click();
+    await page.locator('#confirm-clear-history').click();
     await expect(page.locator('#dashboard-alert')).toContainText('Проверка ошибки очистки');
     await expect(page.locator('.event-card')).toHaveCount(1);
     await page.unroute(clearRoute);
@@ -131,8 +136,8 @@ test('history clear keeps monitoring, new starts reset history, and the latest p
       await route.fulfill({ response });
     });
     await expect.poll(() => held).toBe(true);
-    page.once('dialog', dialog => dialog.accept());
     await page.locator('#clear-history').click();
+    await page.locator('#confirm-clear-history').click();
     await expect(page.locator('#history-empty')).toBeVisible();
     releaseOldState();
     await expect(page.locator('#event-count')).toHaveText('0');

@@ -59,3 +59,16 @@
 }
 .viewer-camera-picker { max-width: 340px; }
 .viewer-camera-picker select { font-size: 14px; }
+.confirm-dialog {
+  width: min(440px, calc(100% - 32px));
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fffefb;
+  color: var(--pine);
+  box-shadow: 0 20px 100px #0005;
+}
+.confirm-dialog::backdrop { background: #11241eb3; }
+.confirm-dialog h2 { font-size: 23px; }
+.confirm-dialog p { margin: 14px 0 22px; font-size: 14px; line-height: 1.7; }
+.confirm-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
