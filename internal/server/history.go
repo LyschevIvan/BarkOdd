@@ -20,7 +20,7 @@ func emptiedHistory(current *room) room {
 	return updated
 }
 
-// The caller holds s.mu. Manual clear preserves the source and its photo budget.
+// The caller holds s.mu. Manual clear preserves the source and allows a new photo.
 func (s *Server) clearHistory(w http.ResponseWriter, current *room) {
 	updated := emptiedHistory(current)
 	now := s.now()
@@ -92,5 +92,5 @@ func clearedPhoto(current *room, body *eventPayload) bool {
 }
 
 func discardEvent(w http.ResponseWriter, current *room) {
-	writeJSON(w, 200, map[string]any{"discarded": true, "historyVersion": current.HistoryVersion})
+	writeJSON(w, 200, map[string]any{"discarded": true, "historyVersion": current.HistoryVersion, "photoStatus": "discarded"})
 }

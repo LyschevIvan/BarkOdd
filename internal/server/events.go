@@ -155,7 +155,7 @@ func (s *Server) reserveEvent(w http.ResponseWriter, r *http.Request, roomID str
 		return nil
 	}
 	now := s.now()
-	decodePhoto := body.Photo != "" && !clearedPhoto(current, body) && eventPhotoDue(current, body, now)
+	decodePhoto := eventPhotoStatus(current, body, now) == "accepted"
 	if current.eventBusy || (decodePhoto && s.eventPhotoDecodes >= maxEventPhotoDecodes) {
 		fail(w, 429, "Обработка событий занята; повторите запрос позже")
 		return nil
@@ -179,16 +179,21 @@ func (s *Server) reserveEvent(w http.ResponseWriter, r *http.Request, roomID str
 	return &eventReservation{server: s, current: current, decodePhoto: decodePhoto, historyVersion: current.HistoryVersion}
 }
 
-func eventPhotoDue(current *room, body *eventPayload, now time.Time) bool {
-	if current.LastPhotoAt != nil && now.Sub(*current.LastPhotoAt) < time.Duration(current.Settings.SnapshotIntervalMS)*time.Millisecond {
-		return false
+// Capture timing belongs to the camera. The server only decides whether this
+// capture is already stored or belongs to an invalidated history.
+func eventPhotoStatus(current *room, body *eventPayload, now time.Time) string {
+	if body.Photo == "" {
+		return "none"
+	}
+	if clearedPhoto(current, body) {
+		return "discarded"
 	}
 	for _, event := range current.Events {
 		if event.EpisodeID == body.EpisodeID && now.Sub(event.LastNoiseAt) <= retention && event.PhotoAt != nil && !body.photoAt.After(*event.PhotoAt) {
-			return false
+			return "duplicate"
 		}
 	}
-	return true
+	return "accepted"
 }
 
 func (reservation *eventReservation) release() {
@@ -234,8 +239,8 @@ func (s *Server) commitEvent(w http.ResponseWriter, r *http.Request, reservation
 		discardEvent(w, current)
 		return
 	}
-	photoDiscarded := clearedPhoto(current, body)
 	now := s.now()
+	photoStatus := eventPhotoStatus(current, body, now)
 	detectedAt, photoAt := body.detectedAt, body.photoAt
 	updated, removed, _ := compact(current, now)
 	index := -1
@@ -266,7 +271,7 @@ func (s *Server) commitEvent(w http.ResponseWriter, r *http.Request, reservation
 		updated.LastNoiseAt = &detectedAt
 	}
 	newPhoto := ""
-	if len(picture) > 0 && !photoDiscarded && (event.PhotoAt == nil || photoAt.After(*event.PhotoAt)) && (updated.LastPhotoAt == nil || now.Sub(*updated.LastPhotoAt) >= time.Duration(updated.Settings.SnapshotIntervalMS)*time.Millisecond) {
+	if photoStatus == "accepted" {
 		id, err := randomID(12)
 		if err != nil {
 			fail(w, 500, "Не удалось сохранить фотографию")
@@ -283,7 +288,6 @@ func (s *Server) commitEvent(w http.ResponseWriter, r *http.Request, reservation
 		event.PhotoFile = newPhoto
 		event.PhotoAt = &photoAt
 		event.HasPhoto = true
-		updated.LastPhotoAt = &now
 	}
 	result := event.Event
 	updated, extraRemoved, _ := compact(&updated, now)
@@ -301,7 +305,8 @@ func (s *Server) commitEvent(w http.ResponseWriter, r *http.Request, reservation
 		Event
 		PhotoDiscarded bool   `json:"photoDiscarded,omitempty"`
 		HistoryVersion uint64 `json:"historyVersion"`
-	}{result, photoDiscarded, current.HistoryVersion})
+		PhotoStatus    string `json:"photoStatus"`
+	}{result, photoStatus == "discarded", current.HistoryVersion, photoStatus})
 }
 
 func (s *Server) getPhoto(w http.ResponseWriter, r *http.Request, current *room, eventID string) {

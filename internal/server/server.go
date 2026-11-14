@@ -91,7 +91,6 @@ type room struct {
 	PairingVersion      uint64        `json:"pairingVersion"`
 	Settings            Settings      `json:"settings"`
 	LastNoiseAt         *time.Time    `json:"lastNoiseAt"`
-	LastPhotoAt         *time.Time    `json:"lastPhotoAt"`
 	Events              []storedEvent `json:"events"`
 	HistorySessionID    string        `json:"historySessionId,omitempty"`
 	HistoryVersion      uint64        `json:"historyVersion"`
@@ -398,7 +397,7 @@ func (s *Server) roomState(w http.ResponseWriter, r *room) {
 	if r.SessionID != "" {
 		session = r.SessionID
 	}
-	writeJSON(w, 200, map[string]any{"turnAuthorizationRequired": s.config.MediaTransport == "webrtc" && len(s.config.TURNURLs) > 0 && !r.OwnerApproved, "mediaTransport": s.config.MediaTransport, "id": r.ID, "name": r.Name, "groupId": r.GroupID, "groupName": s.groups[r.GroupID].Name, "createdAt": r.CreatedAt, "lastSeenAt": r.LastSeenAt, "online": online, "monitoring": online && r.Monitoring, "sessionId": session, "pairingVersion": r.PairingVersion, "lastNoiseAt": r.LastNoiseAt, "settings": r.Settings, "eventCount": len(events), "events": events})
+	writeJSON(w, 200, map[string]any{"turnAuthorizationRequired": s.config.MediaTransport == "webrtc" && len(s.config.TURNURLs) > 0 && !r.OwnerApproved, "mediaTransport": s.config.MediaTransport, "id": r.ID, "name": r.Name, "groupId": r.GroupID, "groupName": s.groups[r.GroupID].Name, "createdAt": r.CreatedAt, "lastSeenAt": r.LastSeenAt, "online": online, "monitoring": online && r.Monitoring, "sessionId": session, "pairingVersion": r.PairingVersion, "lastNoiseAt": r.LastNoiseAt, "settings": r.Settings, "eventCount": len(events), "events": events, "historyVersion": r.HistoryVersion})
 }
 
 func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request, current *room) {
@@ -487,7 +486,6 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request, current *room
 		// Samples may already be queued while the initial heartbeat connects.
 		// The new session identity excludes old uploads without discarding them.
 		updated.HistoryClearedAt = nil
-		updated.LastPhotoAt = nil
 	}
 	updated.LastSeenAt = &now
 	updated.Monitoring = *body.Monitoring

@@ -1190,12 +1190,16 @@ $('settings-form').addEventListener('submit', async (event) => {
     const threshold = sensitivityDirty ? Number($('sensitivity').value) : (room?.settings?.threshold ?? DEFAULT_NOISE_THRESHOLD);
     const settings = await api.put('/settings', { threshold, snapshotIntervalMs: Number($('snapshot-interval').value) });
     if (current !== generation) return;
+    // A room response read before this save must not restore the old camera
+    // settings. Start a fresh poll so invalidating it cannot stop polling.
+    roomPollSequence += 1;
     if (room) room.settings = settings;
     monitor.updateSettings(settings);
     settingsDirty = false;
     fillSettings(settings);
     $('settings-feedback').textContent = 'Настройки сохранены';
     toast('Настройки наблюдения сохранены');
+    void pollRoom(current);
   } catch (error) { if (current === generation) showError(error.message); }
   finally { for (const control of controls) control.disabled = false; }
 });

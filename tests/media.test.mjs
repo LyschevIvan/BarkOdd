@@ -28,6 +28,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
   };
   let time = 0;
+  let wallClockOffset = 0;
   let nextTimer = 0;
   const timers = new Map();
   const levels = [];
@@ -112,8 +113,8 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
   const NativeDate = Date;
   const startedAt = NativeDate.UTC(2026, 0, 1);
   replace('Date', class extends NativeDate {
-    constructor(...args) { super(...(args.length ? args : [startedAt + time])); }
-    static now() { return startedAt + time; }
+    constructor(...args) { super(...(args.length ? args : [startedAt + time + wallClockOffset])); }
+    static now() { return startedAt + time + wallClockOffset; }
   });
   replace('navigator', {
     mediaDevices: { getUserMedia: constraints => {
@@ -226,6 +227,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     resolveWake() { pendingWake(wakeLock); },
     releasedLocks: () => releasedLocks,
     timerCount: () => timers.size,
+    shiftWallClock(duration) { wallClockOffset += duration; },
     setEnabled(value) { microphone.enabled = value; },
     setAudioLevel(value) { audioLevel = value; },
     setVideoReady(value) {
@@ -453,7 +455,7 @@ await test('working camera groups separated bursts inside the interval and the n
   assert.ok(events()[2].body.photo, 'the first update of the next eligible episode must include its captured photo');
 });
 
-await test('a delayed photo confirmation during silence keeps the next burst in the photographed episode', { videoReady: true }, async env => {
+await test('a delayed photo confirmation during silence cannot postpone the next burst photo', { videoReady: true }, async env => {
   let confirm;
   env.onEvent(body => new Promise(resolve => { confirm = () => resolve(eventResult(body)); }));
   await env.monitor.startHost({ settings: { snapshotIntervalMs: 10000 } });
@@ -470,8 +472,8 @@ await test('a delayed photo confirmation during silence keeps the next burst in 
   const events = env.posts.filter(post => post.path === '/events');
   assert.equal(events.length, 2);
   assert.ok(events[0].body.photo);
-  assert.equal(events[1].body.episodeId, events[0].body.episodeId, 'late photo confirmation must prevent an early empty episode');
-  assert.equal(events[1].body.photo, undefined);
+  assert.notEqual(events[1].body.episodeId, events[0].body.episodeId, 'the next burst must use the interval from local capture');
+  assert.ok(events[1].body.photo, 'a late ACK cannot defer a locally eligible photo');
 });
 
 await test('a snapshot encoding error retries on the next qualified noise update', { videoReady: true }, async env => {
@@ -509,7 +511,7 @@ for (const previousPhotoAt of [null, '2025-12-31T23:59:50.000Z']) {
   });
 }
 
-await test('server photo acceptance extends cooldown past the upload response time', { videoReady: true }, async env => {
+await test('legacy photo acceptance leaves cooldown anchored to local capture', { videoReady: true }, async env => {
   let accept;
   env.onEvent(body => new Promise(resolve => { accept = () => resolve(eventResult(body)); }));
   await env.monitor.startHost({ settings: { snapshotIntervalMs: 10000 } });
@@ -521,10 +523,9 @@ await test('server photo acceptance extends cooldown past the upload response ti
   accept();
   env.onEvent(body => Promise.resolve(eventResult(body)));
   await env.settle();
-  await env.advance(10000);
-  assert.equal(photos().length, 1, 'capture must respect the interval after acceptance despite upload latency');
-  await env.advance(1000);
-  assert.equal(photos().length, 2);
+  await env.advance(8000);
+  assert.equal(photos().length, 2, 'a late ACK must not add its latency to the capture interval');
+  assert.equal(Date.parse(photos()[1].body.photoAt) - Date.parse(photos()[0].body.photoAt), 10000);
 });
 
 for (const accepted of [false, true]) {
@@ -729,10 +730,11 @@ await test('a paused heartbeat can clear obsolete queued noise after the source 
   env.setMuted(false);
   await env.advance(1000);
   assert.equal(uploads()[1].body.historyVersion, 4);
-  assert.equal(uploads()[1].body.photo, undefined);
+  assert.ok(uploads()[1].body.photo, 'the first sound after clearing needs a fresh photo');
+  assert.ok(Date.parse(uploads()[1].body.photoAt) >= Date.UTC(2026, 0, 1) + 5000);
 });
 
-await test('a local history clear immediately assigns the new version to the next short burst', { videoReady: true }, async env => {
+await test('a local history clear gives the next short burst a fresh photo without restarting capture', { videoReady: true }, async env => {
   env.onHeartbeat(() => Promise.resolve({ ok: true, historyVersion: 3 }));
   let finishUpload;
   env.onEvent(() => new Promise(resolve => { finishUpload = resolve; }));
@@ -754,12 +756,14 @@ await test('a local history clear immediately assigns the new version to the nex
   assert.equal(uploads.length, 2, 'the first short burst after local clearing must survive without waiting for another heartbeat');
   assert.equal(uploads[1].body.historyVersion, 4);
   assert.ok(uploads[1].body.level > 0.39);
-  assert.equal(uploads[1].body.photo, undefined, 'the old JPEG must be removed with the cleared queue');
+  assert.ok(uploads[1].body.photo, 'a short burst must not wait for the deleted photo cooldown');
+  assert.ok(Date.parse(uploads[1].body.photoAt) > Date.parse(uploads[0].body.photoAt), 'the old JPEG timestamp must not survive clearing');
+  assert.notEqual(uploads[1].body.episodeId, uploads[0].body.episodeId);
   assert.equal(env.mediaRequests(), 1);
   assert.ok(env.stream.getTracks().every(track => track.readyState === 'live'));
 });
 
-await test('a newer heartbeat version clears queued noise and photos without restarting capture or its cooldown', { videoReady: true }, async env => {
+await test('a newer heartbeat version allows a fresh photo and restarts only the photo interval', { videoReady: true }, async env => {
   env.onHeartbeat(() => Promise.resolve({ ok: true, historyVersion: 3 }));
   let finishUpload;
   env.onEvent(body => new Promise(resolve => { finishUpload = () => resolve({ ...eventResult(body), historyVersion: 3 }); }));
@@ -783,12 +787,14 @@ await test('a newer heartbeat version clears queued noise and photos without res
   await env.advance(500);
   assert.equal(uploads().length, 2);
   assert.equal(uploads()[1].body.historyVersion, 4);
-  assert.equal(uploads()[1].body.photo, undefined, 'clearing history must preserve the original capture cooldown');
-  // Noise updates resume on a new one-second cadence after the quiet period.
+  assert.ok(uploads()[1].body.photo, 'remote clearing must allow a fresh photo at the first new sound');
+  assert.ok(Date.parse(uploads()[1].body.photoAt) >= Date.UTC(2026, 0, 1) + 5500);
+  await env.advance(5500);
+  assert.equal(uploads().filter(post => post.body.photo).length, 2, 'the new photo must start a normal interval');
   await env.advance(5500);
   const photos = uploads().filter(post => post.body.photo);
-  assert.equal(photos.length, 2, 'a late response from the previous history must not extend the capture cooldown');
-  assert.equal(photos[1].body.historyVersion, 4);
+  assert.equal(photos.length, 3);
+  assert.ok(photos.slice(1).every(post => post.body.historyVersion === 4));
 });
 
 await test('a discarded upload advances history version and removes all noise sampled under the previous version', { videoReady: true }, async env => {
@@ -810,7 +816,8 @@ await test('a discarded upload advances history version and removes all noise sa
   await env.advance(500);
   assert.equal(uploads().length, 2);
   assert.equal(uploads()[1].body.historyVersion, 4);
-  assert.equal(uploads()[1].body.photo, undefined, 'the old JPEG must not be relabeled with the new version');
+  assert.ok(uploads()[1].body.photo);
+  assert.ok(Date.parse(uploads()[1].body.photoAt) > Date.parse(uploads()[0].body.photoAt), 'the new version must capture a fresh photo');
 });
 
 await test('a delayed heartbeat cannot downgrade a newer version learned from a discarded upload', { videoReady: true }, async env => {
@@ -852,7 +859,8 @@ await test('a delayed discarded response cannot downgrade history or remove nois
   const uploads = env.posts.filter(post => post.path === '/events');
   assert.equal(uploads.length, 2, 'a stale discarded response must preserve the current version queue');
   assert.equal(uploads[1].body.historyVersion, 5);
-  assert.equal(uploads[1].body.photo, undefined);
+  assert.ok(uploads[1].body.photo);
+  assert.ok(Date.parse(uploads[1].body.photoAt) >= Date.UTC(2026, 0, 1) + 5000, 'a stale reply must not remove the new history photo');
   assert.ok(Date.parse(uploads[1].body.detectedAt) >= Date.UTC(2026, 0, 1) + 5000);
 });
 
@@ -1389,6 +1397,132 @@ await test('a late retry for a replaced RTC track cannot block its replacement',
   await retry;
   await env.advance(500);
   assert.equal(env.audioStatuses[env.audioStatuses.length - 1].kind, 'live');
+});
+
+for (const disposition of ['legacy', 'accepted', 'duplicate']) {
+  await test(`${disposition} acknowledgement removes only its JPEG and never shifts the local capture cadence`, { videoReady: true }, async env => {
+    const captures = [];
+    env.onSnapshot(() => { captures.push(performance.now()); return 'data:image/jpeg;base64,/9j/2Q=='; });
+    env.onHeartbeat(() => Promise.resolve({ historyVersion: 3 }));
+    let finish;
+    env.onEvent(body => new Promise(resolve => { finish = () => resolve({
+      ...eventResult(body, disposition === 'legacy' ? body.photoAt : null), historyVersion: 3,
+      ...(disposition === 'legacy' ? {} : { photoStatus: disposition }),
+    }); }));
+    await env.monitor.startHost({ settings: { snapshotIntervalMs: 10000 } });
+    await env.settle(); env.openSocket('host');
+    await env.advance(9500);
+    assert.deepEqual(captures, [150]);
+    finish(); await env.settle();
+    env.onEvent(body => Promise.resolve({ ...eventResult(body, null), historyVersion: 3, photoStatus: body.photo ? 'accepted' : 'none' }));
+    await env.advance(11000);
+    assert.deepEqual(captures, [150, 10150, 20150], 'the ten-second interval begins at each local JPEG capture');
+    const photos = env.posts.filter(post => post.path === '/events' && post.body.photo);
+    assert.equal(photos.length, 3, 'explicit dispositions settle photos without relying on the legacy timestamp');
+    assert.equal(new Set(photos.map(post => post.body.episodeId)).size, 3, 'continuous noise must start a separate card each interval');
+  });
+}
+
+await test('a timed-out event upload cannot stop local captures or lose their later upload', { videoReady: true }, async env => {
+  const captures = [];
+  env.onSnapshot(() => { captures.push(performance.now()); return 'data:image/jpeg;base64,/9j/2Q=='; });
+  let finish;
+  env.onEvent(body => new Promise(resolve => { finish = () => resolve({ ...eventResult(body), photoStatus: 'accepted' }); }));
+  await env.monitor.startHost({ settings: { snapshotIntervalMs: 10000 } });
+  await env.settle(); env.openSocket('host');
+  await env.advance(12500);
+  assert.deepEqual(captures, [150, 10150]);
+  assert.equal(env.errors.length, 1);
+  assert.match(env.errors.pop().message, /Сервер не отвечает/);
+  finish(); await env.settle();
+  env.onEvent(body => Promise.resolve({ ...eventResult(body), photoStatus: body.photo ? 'accepted' : 'none' }));
+  await env.advance(8000);
+  assert.deepEqual(captures, [150, 10150, 20150], 'a late response after timeout must not alter the next capture');
+  const uploaded = new Set(env.posts.filter(post => post.path === '/events' && post.body.photo).map(post => post.body.photoAt));
+  assert.equal(uploaded.size, 3, 'all distinct local captures must eventually upload');
+});
+
+await test('offline photo backlog stays bounded and drains without applying a second interval on upload', { videoReady: true }, async env => {
+  let captures = 0;
+  env.onHeartbeat(() => Promise.resolve({ historyVersion: 3 }));
+  env.onEvent(body => Promise.resolve({ ...eventResult(body), historyVersion: 3, photoStatus: body.photo ? 'accepted' : 'none' }));
+  env.onSnapshot(() => { captures++; return 'data:image/jpeg;base64,/9j/2Q=='; });
+  await env.monitor.startHost({ settings: { snapshotIntervalMs: 10000 } });
+  await env.advance(140500);
+  assert.equal(captures, 15, 'offline capture still follows the local interval');
+  assert.equal(env.posts.filter(post => post.path === '/events').length, 0);
+  env.setAudioLevel(0);
+  while (env.sockets[env.sockets.length - 1].readyState === 3) await env.advance(500);
+  env.openSocket('host');
+  await env.advance(6000);
+  const uploads = env.posts.filter(post => post.path === '/events');
+  assert.equal(uploads.length, 12, 'all retained photos must drain through the existing 500ms request loop');
+  assert.equal(new Set(uploads.map(post => post.body.episodeId)).size, 12);
+  assert.ok(uploads.every(post => post.body.photo));
+  assert.equal(Date.parse(uploads[0].body.photoAt), Date.UTC(2026, 0, 1) + 30150, 'the oldest three of fifteen offline captures must be evicted');
+  assert.ok(uploads.every((post, index) => !index || post.at - uploads[index - 1].at === 500));
+  await env.advance(1000);
+  assert.equal(env.posts.filter(post => post.path === '/events').length, 12, 'successful uploads must remove every retained capture');
+});
+
+await test('expired pending JPEGs are removed without dropping fresh noise from the same episode', { videoReady: true }, async env => {
+  env.onHeartbeat(() => Promise.resolve({ historyVersion: 3 }));
+  await env.monitor.startHost({ settings: { snapshotIntervalMs: 10000 } });
+  await env.advance(500);
+  env.setVideoReady(false);
+  env.shiftWallClock(24 * 60 * 60 * 1000);
+  await env.advance(1000);
+  env.setAudioLevel(0);
+  env.openSocket('host');
+  await env.advance(500);
+  const uploads = env.posts.filter(post => post.path === '/events');
+  assert.equal(uploads.length, 1, 'new noise must survive expiry of its older JPEG');
+  assert.equal(uploads[0].body.photo, undefined);
+  assert.equal(uploads[0].body.photoAt, undefined);
+  assert.ok(Date.parse(uploads[0].body.detectedAt) >= Date.UTC(2026, 0, 2));
+});
+
+await test('queued noise and JPEGs expire after twenty-four hours without new input', { videoReady: true }, async env => {
+  env.onHeartbeat(() => Promise.resolve({ historyVersion: 3 }));
+  await env.monitor.startHost();
+  await env.advance(500);
+  env.setAudioLevel(0);
+  env.shiftWallClock(24 * 60 * 60 * 1000);
+  env.openSocket('host');
+  await env.advance(1000);
+  assert.equal(env.posts.filter(post => post.path === '/events').length, 0);
+});
+
+await test('an unconfirmed JPEG from a legacy server cannot hide noise in a newer episode', { videoReady: true }, async env => {
+  let finish;
+  env.onEvent(body => new Promise(resolve => { finish = () => resolve(eventResult(body, null)); }));
+  await env.monitor.startHost({ settings: { snapshotIntervalMs: 10000 } });
+  await env.settle(); env.openSocket('host');
+  await env.advance(10500);
+  env.setAudioLevel(0);
+  finish(); await env.settle();
+  env.onEvent(body => Promise.resolve(eventResult(body, null)));
+  await env.advance(1000);
+  const uploads = env.posts.filter(post => post.path === '/events');
+  assert.ok(uploads.some(post => post.body.episodeId !== uploads[0].body.episodeId), 'fresh noise must progress even when an old server never confirms the oldest JPEG');
+});
+
+await test('live interval settings recalculate from the last capture without restarting devices', { videoReady: true }, async env => {
+  const captures = [];
+  env.onSnapshot(() => { captures.push(performance.now()); return 'data:image/jpeg;base64,/9j/2Q=='; });
+  await env.monitor.startHost();
+  await env.settle(); env.openSocket('host');
+  await env.advance(5000);
+  assert.deepEqual(captures, [150]);
+  env.monitor.updateSettings({ snapshotIntervalMs: 10000 });
+  await env.advance(5500);
+  assert.deepEqual(captures, [150, 10150], 'shortening the interval must retain the previous capture time');
+  env.monitor.updateSettings({ snapshotIntervalMs: 30000 });
+  await env.advance(29500);
+  assert.deepEqual(captures, [150, 10150]);
+  await env.advance(500);
+  assert.deepEqual(captures, [150, 10150, 40150], 'lengthening the interval must start from the last capture, not the settings change');
+  assert.equal(env.mediaRequests(), 1);
 });
 
 console.log(`${passed} media tests passed; ${failed} failed`);

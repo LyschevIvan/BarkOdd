@@ -170,8 +170,13 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     // Samples captured before the first healthy heartbeat belong to the new session.
     // Every subsequent history version invalidates all queued noise and photos.
     if (initialHeartbeat) {
-      for (const payload of state.events.values()) payload.historyVersion = version;
-    } else state.events.clear();
+      for (const entry of state.events.values()) entry.noise.historyVersion = version;
+    } else {
+      state.events.clear();
+      // The deleted photo must not delay the first sound's photo in the new
+      // history. Keep the settings and running media, start a fresh episode.
+      state.detector = new NoiseDetector(state.detector);
+    }
     state.historyVersion = version;
   }
 
@@ -455,23 +460,21 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
       emit(onLevel, level);
       const event = state.detector.process(level, now());
       if (event) {
-        const previous = state.events.get(event.episodeId);
-        let photo = previous?.photo;
-        let photoAt = previous?.photoAt;
+        const entry = state.events.get(event.episodeId) || { capture: null };
         if (event.takePhoto) {
           try {
             const captured = snapshot(state);
             if (captured) {
-              photo = captured;
-              photoAt = new Date().toISOString();
+              entry.capture = { photo: captured, photoAt: new Date().toISOString() };
               state.detector.photoCaptured(now());
             }
           } catch (error) { report(error); }
         }
         const payload = { sessionId: state.sessionId, episodeId: event.episodeId, level, detectedAt: new Date().toISOString() };
         if (state.historyVersion !== undefined) payload.historyVersion = state.historyVersion;
-        if (photo) { payload.photo = photo; payload.photoAt = photoAt; }
-        state.events.set(event.episodeId, payload);
+        entry.noise = payload;
+        entry.pendingNoise = true;
+        state.events.set(event.episodeId, entry);
         if (state.events.size > 12) state.events.delete(state.events.keys().next().value);
       }
     } catch (error) { report(error); }
@@ -480,33 +483,44 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
 
   async function flushEvents(state) {
     if (!state.ready) return;
-    const payload = state.events.values().next().value;
-    if (!payload) return;
-    if (Date.now() - Date.parse(payload.detectedAt) >= 24 * 60 * 60 * 1000) {
-      state.events.delete(payload.episodeId);
-      return;
+    let entry, capture;
+    for (const [id, queued] of state.events) {
+      if (Date.now() - Date.parse(queued.noise.detectedAt) >= 24 * 60 * 60 * 1000) {
+        state.events.delete(id);
+        continue;
+      }
+      if (queued.capture && Date.now() - Date.parse(queued.capture.photoAt) >= 24 * 60 * 60 * 1000) queued.capture = null;
+      if (!queued.pendingNoise && !queued.capture) {
+        state.events.delete(id);
+        continue;
+      }
+      // Fresh noise takes priority over an older retry-only JPEG. Requests stay
+      // sequential at 500ms, independent of the local camera capture interval.
+      if (queued.pendingNoise) {
+        entry = queued; capture = queued.capture; break;
+      }
+      if (!entry && queued.capture) { entry = queued; capture = queued.capture; }
     }
-    if (payload.photo && Date.now() - Date.parse(payload.photoAt) >= 24 * 60 * 60 * 1000) {
-      delete payload.photo;
-      delete payload.photoAt;
-    }
+    if (!entry) return;
+    const noise = entry.noise;
+    const payload = { ...noise };
+    if (capture) { payload.photo = capture.photo; payload.photoAt = capture.photoAt; }
     const saved = await request(state, 'post', '/events', payload);
     if (!state.active) return;
     applyHistoryVersion(state, saved?.historyVersion);
     if (state.historyVersion !== undefined && payload.historyVersion !== state.historyVersion) return;
-    // Clearing history consumes the outdated upload without confirming its photo.
-    if (payload.photo && !saved?.discarded && !saved?.photoDiscarded) {
-      // A successful noise update can still skip its photo during server cooldown.
-      // Keep that JPEG queued until the returned event confirms its timestamp.
-      if (!(Date.parse(saved?.photoAt) >= Date.parse(payload.photoAt))) return;
-      state.detector.photoCaptured(now());
+    if (entry.noise === noise) entry.pendingNoise = false;
+    if (capture) {
+      const disposition = saved?.photoStatus;
+      const legacy = disposition === undefined;
+      const accepted = disposition === 'accepted' || disposition === 'duplicate' ||
+        (legacy && !saved?.discarded && !saved?.photoDiscarded && Date.parse(saved?.photoAt) >= Date.parse(capture.photoAt));
+      const discarded = disposition === 'discarded' || saved?.discarded || saved?.photoDiscarded;
+      if (accepted || discarded) {
+        if (entry.capture === capture) entry.capture = null;
+      }
     }
-    const current = state.events.get(payload.episodeId);
-    if (current === payload) state.events.delete(payload.episodeId);
-    else if (current?.photo === payload.photo && current?.photoAt === payload.photoAt) {
-      delete current.photo;
-      delete current.photoAt;
-    }
+    if (!entry.pendingNoise && !entry.capture && state.events.get(payload.episodeId) === entry) state.events.delete(payload.episodeId);
   }
 
   async function acquireWakeLock(state) {

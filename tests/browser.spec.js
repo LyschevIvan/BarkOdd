@@ -224,9 +224,9 @@ test('noise updates within a minute keep the displayed photo and its controls st
     window.__photoObserver.observe(document.querySelector('#latest-photo'), { attributes: true, attributeFilter: ['src', 'hidden'] });
   });
 
-  // Submit a second JPEG deliberately: the server must retain the first during
-  // the minute, while the UI updates the sound time without flashing that JPEG.
-  const update = await page.request.post(`${url}/events`, { headers, data: { sessionId, episodeId: 'continuous', photo, level: 0.4 } });
+  // Retry the same capture with fresh noise: deduplication preserves the photo
+  // while the UI updates the sound time without flashing that JPEG.
+  const update = await page.request.post(`${url}/events`, { headers, data: { sessionId, episodeId: 'continuous', photo, photoAt: first.photoAt, level: 0.4 } });
   expect(update.status()).toBe(200);
   expect((await update.json()).photoAt).toBe(first.photoAt);
   await expect(page.locator('.event-detail').first()).not.toHaveText(firstDetail);
@@ -235,6 +235,53 @@ test('noise updates within a minute keep the displayed photo and its controls st
   expect(await page.evaluate(() => window.__photoChanges)).toEqual([]);
   await expect(page.locator('.event-photo-button')).toBeFocused();
 });
+
+for (const clearFrom of ['source', 'another device']) {
+test(`the first noise after clearing history from ${clearFrom} gets a fresh photo`, async ({ page, baseURL }) => {
+  await instrument(page);
+  await loginOwner(page);
+  await page.locator('#choose-host').click();
+  await page.locator('#room-name').fill('Photo after clear');
+  await page.locator('#host-form button[type=submit]').click();
+  await expect(page.locator('#dashboard')).toBeVisible();
+  const binding = await savedHost(page);
+  const url = roomURL(baseURL, binding.id);
+  const headers = { Origin: new URL(baseURL).origin };
+  const state = async () => (await page.request.get(url)).json();
+  expect((await page.request.put(`${url}/settings`, { headers, data: { threshold: 0.01, snapshotIntervalMs: 60000 } })).status()).toBe(200);
+  await page.reload();
+  await page.locator('#capture-button').click();
+  await expect.poll(async () => (await state()).events.filter(event => event.hasPhoto).length).toBe(1);
+  const before = await state();
+  const first = before.events[0];
+  await page.evaluate(() => {
+    window.__sourceBeforeClear = document.querySelector('#camera-video').srcObject;
+    window.__audioBeforeClear = window.__audioContexts[0];
+  });
+  if (clearFrom === 'source') {
+    await page.locator('#clear-history').click();
+    await page.locator('#confirm-clear-history').click();
+    await expect(page.locator('#clear-history-dialog')).toBeHidden();
+  } else {
+    expect((await page.request.delete(`${url}/events`, { headers })).status()).toBe(200);
+  }
+  await expect.poll(async () => (await state()).events.some(event => event.id !== first.id && event.hasPhoto), { timeout: 15000 }).toBe(true);
+  const after = await state();
+  expect(after.events).toHaveLength(1);
+  expect(after.events[0].hasPhoto).toBe(true);
+  expect(Date.parse(after.events[0].photoAt)).toBeGreaterThan(Date.parse(first.photoAt));
+  expect(Date.parse(after.events[0].photoAt) - Date.parse(first.photoAt)).toBeLessThan(60000);
+  expect(after.sessionId).toBe(before.sessionId);
+  expect(after.monitoring).toBe(true);
+  await expect(page.locator('.event-card')).toHaveCount(1);
+  await expect(page.locator('.event-photo-button img')).toBeVisible();
+  expect(await page.evaluate(() => document.querySelector('#camera-video').srcObject === window.__sourceBeforeClear &&
+    window.__sourceBeforeClear.getTracks().every(track => track.readyState === 'live') &&
+    window.__audioContexts.length === 1 && window.__audioContexts[0] === window.__audioBeforeClear &&
+    window.__audioBeforeClear.state === 'running')).toBe(true);
+  await page.locator('#capture-button').click();
+});
+}
 
 test('noise bursts within the photo interval update one photographed history event', async ({ page, baseURL }) => {
   await loginOwner(page);

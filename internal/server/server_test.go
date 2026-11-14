@@ -240,19 +240,19 @@ func TestHeartbeatExpiresAndRestartDoesNotAppearOnline(t *testing.T) {
 	}
 }
 
-func TestEventMergeSnapshotCooldownAndPersistence(t *testing.T) {
+func TestEventMergePhotosAndPersistence(t *testing.T) {
 	f := setup(t)
 	first := f.event("episode-one", photo(30))
 	photoAt := first["photoAt"]
 	f.now = f.now.Add(2 * time.Second)
 	second := f.event("episode-one", photo(60))
-	if second["id"] != first["id"] || second["photoAt"] != photoAt || second["lastNoiseAt"] == first["lastNoiseAt"] {
+	if second["id"] != first["id"] || second["photoAt"] == photoAt || second["lastNoiseAt"] == first["lastNoiseAt"] {
 		t.Fatal(first, second)
 	}
 	f.now = f.now.Add(2 * time.Second)
 	third := f.event("episode-two", photo(90))
-	if third["hasPhoto"] != false {
-		t.Fatal("cooldown bypassed by new episode")
+	if third["hasPhoto"] != true {
+		t.Fatal("a recent photo blocked a new episode photo")
 	}
 	f.now = f.now.Add(30 * time.Second)
 	fourth := f.event("episode-one", photo(120))

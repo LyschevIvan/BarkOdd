@@ -70,7 +70,7 @@ func TestInvalidEventPhotosConsumeBudgetAndReleaseAdmission(t *testing.T) {
 	}
 }
 
-func TestEventCooldownSkipsDecodeAndStillUpdatesNoise(t *testing.T) {
+func TestEventRecentPhotoDoesNotSkipJPEGValidation(t *testing.T) {
 	f := setup(t)
 	startEventSession(f)
 	var first Event
@@ -81,13 +81,12 @@ func TestEventCooldownSkipsDecodeAndStillUpdatesNoise(t *testing.T) {
 	}
 	corrupt := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(data[:len(data)-12])
 	f.now = f.now.Add(time.Second)
-	var updated Event
-	decode(t, f.call("POST", f.path("/events"), f.host, eventBody("noise", corrupt), 200), &updated)
-	if !updated.LastNoiseAt.After(first.LastNoiseAt) || updated.PhotoAt == nil || !updated.PhotoAt.Equal(*first.PhotoAt) {
-		t.Fatal("cooldown failed to preserve photo and merge noise", first, updated)
-	}
-	f.now = f.now.Add(30 * time.Second)
 	f.call("POST", f.path("/events"), f.host, eventBody("noise", corrupt), 400)
+	var updated Event
+	decode(t, f.call("POST", f.path("/events"), f.host, eventBody("noise", ""), 200), &updated)
+	if !updated.LastNoiseAt.After(first.LastNoiseAt) || updated.PhotoAt == nil || !updated.PhotoAt.Equal(*first.PhotoAt) {
+		t.Fatal("noise-only update failed to preserve photo and merge noise", first, updated)
+	}
 }
 
 func TestEventPreparationDoesNotHoldRoomMutex(t *testing.T) {
@@ -331,7 +330,7 @@ func TestEventCommitPreservesConcurrentSettings(t *testing.T) {
 	r, body, reservation := reserveEventForTest(t, f, f.path(""), f.host)
 	f.call("PUT", f.path("/settings"), f.host, map[string]any{"threshold": 0.12, "snapshotIntervalMs": 10000}, 200)
 	w := httptest.NewRecorder()
-	f.s.commitEvent(w, r, reservation, body, nil)
+	f.s.commitEvent(w, r, reservation, body, jpegFrame(60))
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}

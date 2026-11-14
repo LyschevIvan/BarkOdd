@@ -125,32 +125,27 @@ test('photo-less bursts share an episode until its interval expires and keep req
   assert.deepEqual(detector.process(0.2, 15850), { episodeId: next.episodeId, takePhoto: true });
 });
 
-test('photo confirmation during silence extends the current episode before the next burst qualifies', () => {
+test('a long silence leaves the local capture deadline unchanged for the next qualified burst', () => {
   const detector = make({ snapshotIntervalMs: 10000 });
   detector.process(0.2, 0);
   const first = detector.process(0.2, 150);
   detector.photoCaptured(150);
   detector.process(0, 10150);
   detector.process(0.2, 11000);
-  detector.photoCaptured(11050);
-  assert.deepEqual(detector.process(0.2, 11150), { episodeId: first.episodeId, takePhoto: false });
-  detector.process(0, 11200);
-  detector.process(0.2, 21100);
-  const next = detector.process(0.2, 21250);
+  const next = detector.process(0.2, 11150);
   assert.notEqual(next.episodeId, first.episodeId);
   assert.equal(next.takePhoto, true);
 });
 
-for (const burstAt of [14999, 15000]) {
-  test(`a new episode ${burstAt === 15000 ? 'starts at' : 'waits until'} the confirmed photo interval boundary`, () => {
+for (const burstAt of [9999, 10000]) {
+  test(`a new episode ${burstAt === 10000 ? 'starts at' : 'waits until'} the local capture interval boundary`, () => {
     const detector = make({ snapshotIntervalMs: 10000, minNoiseMs: 0 });
     const first = detector.process(0.2, 0);
     detector.photoCaptured(0);
-    detector.photoCaptured(5000);
     detector.process(0, 5100);
     const next = detector.process(0.2, burstAt);
-    assert.equal(next.episodeId === first.episodeId, burstAt < 15000);
-    assert.equal(next.takePhoto, burstAt === 15000);
+    assert.equal(next.episodeId === first.episodeId, burstAt < 10000);
+    assert.equal(next.takePhoto, burstAt === 10000);
   });
 }
 
@@ -237,6 +232,18 @@ test('invalid audio samples cannot create noise and IDs do not depend on the tim
   first.process(0.3, 1000);
   second.process(0.3, 1000);
   assert.notEqual(first.process(0.3, 1150).episodeId, second.process(0.3, 1150).episodeId);
+});
+
+test('lengthening the interval keeps its start at the last successful capture', () => {
+  const detector = make({ minNoiseMs: 0, snapshotIntervalMs: 10000 });
+  const first = detector.process(0.2, 0);
+  detector.photoCaptured(0);
+  assert.equal(detector.process(0.2, 5000).takePhoto, false);
+  detector.updateSettings({ snapshotIntervalMs: 30000 });
+  assert.equal(detector.process(0.2, 29000).takePhoto, false);
+  const next = detector.process(0.2, 30000);
+  assert.equal(next.takePhoto, true);
+  assert.notEqual(next.episodeId, first.episodeId);
 });
 
 console.log(`${passed} detector tests passed`);

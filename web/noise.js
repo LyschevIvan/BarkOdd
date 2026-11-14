@@ -37,6 +37,8 @@ export class NoiseDetector {
   }
 
   photoCaptured(now) {
+    // Only successful local JPEG capture starts this interval. Network replies
+    // confirm queued data and never affect capture or episode scheduling.
     if (Number.isFinite(now)) this.lastPhotoAt = Math.max(now, this.lastTime, this.lastPhotoAt);
   }
 
@@ -55,14 +57,15 @@ export class NoiseDetector {
     this.lastAboveAt = now;
     if (this.candidateAt === null) this.candidateAt = now;
     if (now - this.candidateAt < this.minNoiseMs || now - this.lastEmitAt < 1000) return null;
-    // Start the next card with a qualified update after the interval, even
-    // if the sound continues. A photo confirmation can extend that interval.
-    const intervalStartedAt = Math.max(this.lastEpisodeAt, this.lastPhotoAt);
-    if (!this.episode || now - intervalStartedAt >= this.snapshotIntervalMs) {
+    // Keep creating cards during continuous noise. A camera with no usable frame
+    // still groups noise by interval while retrying capture on each update.
+    const photoDueAt = this.lastPhotoAt + this.snapshotIntervalMs;
+    const episodeDueAt = Math.max(this.lastEpisodeAt, this.lastPhotoAt) + this.snapshotIntervalMs;
+    if (!this.episode || now >= episodeDueAt) {
       this.episode = episodeId();
       this.lastEpisodeAt = now;
     }
-    const takePhoto = now - this.lastPhotoAt >= this.snapshotIntervalMs;
+    const takePhoto = now >= photoDueAt;
     this.lastEmitAt = now;
     return { episodeId: this.episode, takePhoto };
   }

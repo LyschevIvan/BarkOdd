@@ -66,12 +66,32 @@ func TestHistoryClearRequiresOwnerAndKeepsRoomRunning(t *testing.T) {
 	}
 	f.now = f.now.Add(time.Second)
 	next := f.event("new", photo(40))
-	if next["hasPhoto"] != false {
-		t.Fatal("manual clear reset photo cooldown", next)
+	if next["hasPhoto"] != true {
+		t.Fatal("manual clear blocked the first new photo", next)
 	}
+	f.call("GET", f.path("/events/"+next["id"].(string)+"/photo"), f.viewer, nil, 200)
 	restartHistoryServer(t, f)
 	if f.state()["eventCount"] != float64(1) {
 		t.Fatal("history change not persisted")
+	}
+}
+
+func TestHistoryClearAcceptsNewPhotosAfterRestart(t *testing.T) {
+	f := setup(t)
+	f.event("old", photo(30))
+	f.now = f.now.Add(time.Second)
+	f.call("DELETE", f.path("/events"), f.host, nil, 200)
+	restartHistoryServer(t, f)
+	f.now = f.now.Add(time.Second)
+	first := f.event("new", photo(40))
+	if first["hasPhoto"] != true {
+		t.Fatal("restart blocked the first photo after clearing history", first)
+	}
+	f.call("GET", f.path("/events/"+first["id"].(string)+"/photo"), f.viewer, nil, 200)
+	f.now = f.now.Add(time.Second)
+	refreshed := f.event("new", photo(50))
+	if refreshed["photoAt"] == first["photoAt"] {
+		t.Fatal("recent photo prevented an updated capture after clearing history", first, refreshed)
 	}
 }
 
@@ -141,14 +161,14 @@ func TestHistoryClearDiscardsDelayedNoiseAndOldPhoto(t *testing.T) {
 	assertHistoryEmpty(t, f)
 	body["detectedAt"] = f.now
 	decode(t, f.call("POST", f.path("/events"), f.host, body, 200), &result)
-	if result["photoDiscarded"] != true || result["hasPhoto"] != false || f.state()["eventCount"] != float64(1) {
+	if result["photoStatus"] != "discarded" || result["photoDiscarded"] != true || result["hasPhoto"] != false || f.state()["eventCount"] != float64(1) {
 		t.Fatal("new noise did not discard only old photo", result)
 	}
 	body["photoAt"] = f.now
 	result = nil
 	decode(t, f.call("POST", f.path("/events"), f.host, body, 200), &result)
 	if result["hasPhoto"] != true || result["photoDiscarded"] == true {
-		t.Fatal("discarded photo consumed cooldown", result)
+		t.Fatal("discarding a stale photo prevented a fresh photo", result)
 	}
 }
 
@@ -163,7 +183,7 @@ func TestHistoryClearInvalidatesAlreadyReservedEvent(t *testing.T) {
 	f.s.commitEvent(response, request, reservation, body, jpegFrame(40))
 	var result map[string]any
 	decode(t, response, &result)
-	if response.Code != 200 || result["discarded"] != true {
+	if response.Code != 200 || result["discarded"] != true || result["photoStatus"] != "discarded" {
 		t.Fatal("reserved event survived clear", response.Code, result)
 	}
 	assertHistoryEmpty(t, f)

@@ -100,6 +100,67 @@ test('continued sound saves separate photos at the minimum interval and silence 
   }
 });
 
+for (const heldPart of ['response', 'upload']) {
+test(`photo capture keeps its local interval with a delayed ${heldPart}`, async ({ page, baseURL }) => {
+  await syntheticMicrophone(page);
+  await page.addInitScript(() => {
+    window.__photoCaptures = [];
+    const encode = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function (...args) {
+      const result = encode.apply(this, args);
+      if (args[0] === 'image/jpeg' && result.startsWith('data:image/jpeg;base64,')) window.__photoCaptures.push(performance.now());
+      return result;
+    };
+  });
+  const { url, state } = await createHost(page, baseURL, `Camera interval with delayed ${heldPart}`);
+  const headers = { Origin: new URL(baseURL).origin };
+  expect((await page.request.put(`${url}/settings`, { headers, data: { threshold: 0.01, snapshotIntervalMs: 10000 } })).status()).toBe(200);
+  await page.reload();
+  let release;
+  const hold = new Promise(resolve => { release = resolve; });
+  let firstUpload = false;
+  const savedPhotos = [];
+  await page.route(`${url}/events`, async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    const body = route.request().postDataJSON();
+    const first = body.photo && !firstUpload;
+    if (first) firstUpload = true;
+    if (first && heldPart === 'upload') await hold;
+    const response = await route.fetch();
+    const saved = await response.json();
+    if (body.photo) savedPhotos.push({ body, saved, receivedAt: Date.now() });
+    if (first && heldPart === 'response') await hold;
+    await route.fulfill({ response });
+  });
+  try {
+    await page.locator('#capture-button').click();
+    await expect.poll(() => firstUpload).toBe(true);
+    if (heldPart === 'response') {
+      // A five-second network response delay must not restart a ten-second
+      // capture interval. Wait for that measured clock boundary, not a sleep.
+      await page.waitForFunction(() => performance.now() - window.__photoCaptures[0] >= 5000);
+    } else {
+      await expect.poll(() => page.evaluate(() => window.__photoCaptures.length), { timeout: 12000 }).toBeGreaterThanOrEqual(2);
+    }
+    release();
+    await expect.poll(() => page.evaluate(() => window.__photoCaptures.length), { timeout: 13000 }).toBeGreaterThanOrEqual(2);
+    const captures = await page.evaluate(() => window.__photoCaptures);
+    expect(captures[1] - captures[0]).toBeGreaterThanOrEqual(10000);
+    expect(captures[1] - captures[0]).toBeLessThan(12500);
+    await expect.poll(() => savedPhotos.length).toBeGreaterThanOrEqual(2);
+    expect(savedPhotos.slice(0, 2).every(({ saved }) => saved.hasPhoto && saved.photoStatus === 'accepted')).toBe(true);
+    expect(savedPhotos[1].body.episodeId).not.toBe(savedPhotos[0].body.episodeId);
+    if (heldPart === 'upload') expect(savedPhotos[1].receivedAt - savedPhotos[0].receivedAt).toBeLessThan(3000);
+    await expect.poll(async () => (await state()).events.filter(event => event.hasPhoto).length).toBe(2);
+    expect(await page.evaluate(() => window.__syntheticMicrophoneRequests)).toBe(1);
+    await page.locator('#capture-button').click();
+  } finally {
+    release();
+    await page.evaluate(() => window.__syntheticMicrophone?.audio.close());
+  }
+});
+}
+
 test('microphone levels and disabled-input recovery work with a real Web Audio graph', async ({ page, baseURL }) => {
   await syntheticMicrophone(page);
   const { state } = await createHost(page, baseURL, 'Synthetic microphone regression');
@@ -191,6 +252,46 @@ test('saving the photo interval preserves a legacy threshold between presets', a
   await expect(page.locator('#sensitivity')).toHaveValue('0.1');
   await expect(page.locator('#snapshot-interval')).toHaveValue('60000');
   expect((await state()).settings.threshold).toBe(0.06);
+});
+
+test('a delayed room poll cannot roll back saved camera settings during a short sound', async ({ page, baseURL }) => {
+  await syntheticMicrophone(page, 0);
+  const { url, state } = await createHost(page, baseURL, 'Saved camera settings');
+  expect((await page.request.put(`${url}/settings`, {
+    headers: { Origin: new URL(baseURL).origin }, data: { threshold: 0.5, snapshotIntervalMs: 30000 },
+  })).status()).toBe(200);
+  await page.reload();
+  await page.locator('#capture-button').click();
+  await expect(page.locator('#capture-button')).toHaveText('Остановить наблюдение');
+  let release;
+  let held = false;
+  const hold = new Promise(resolve => { release = resolve; });
+  await page.route(url, async route => {
+    if (held || route.request().method() !== 'GET') return route.continue();
+    const response = await route.fetch();
+    held = true;
+    await hold;
+    await route.fulfill({ response });
+  });
+  try {
+    await expect.poll(() => held).toBe(true);
+    await page.locator('#sensitivity').selectOption('0.0005');
+    await page.locator('#snapshot-interval').selectOption('10000');
+    await saveSettings(page, url);
+    const staleArrived = page.waitForResponse(response => response.request().method() === 'GET' && response.url() === url);
+    release();
+    await staleArrived;
+    await page.evaluate(() => {
+      window.__syntheticMicrophone.gain.gain.value = 0.02;
+      setTimeout(() => { window.__syntheticMicrophone.gain.gain.value = 0; }, 500);
+    });
+    await expect.poll(async () => (await state()).events.filter(event => event.hasPhoto).length, { timeout: 5000 }).toBe(1);
+    expect(await page.evaluate(() => window.__syntheticMicrophoneRequests)).toBe(1);
+    await page.locator('#capture-button').click();
+  } finally {
+    release();
+    await page.evaluate(() => window.__syntheticMicrophone?.audio.close());
+  }
 });
 
 test('settings choices stay locked until an in-flight save completes', async ({ page, baseURL }) => {
