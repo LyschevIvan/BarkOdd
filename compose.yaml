@@ -18,6 +18,12 @@ services:
       TURN_PASSWORD: ${TURN_PASSWORD:-}
     volumes:
       - barkodd_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
   https:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -32,7 +38,8 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - app
+      app:
+        condition: service_healthy
 volumes:
   barkodd_data:
   caddy_data:

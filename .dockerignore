@@ -3,6 +3,7 @@ node_modules
 data
 bin
 .env
+.env.*
 deploy/turnserver.macmini.conf
 test-results
 playwright-report

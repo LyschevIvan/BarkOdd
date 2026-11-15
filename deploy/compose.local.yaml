@@ -1,0 +1,32 @@
+# Used through `make docker-up`: project directory is the repository root.
+name: barkodd-local
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      ADDR: 0.0.0.0:8080
+      DATA_DIR: /data
+      AUTH_MODE: ${AUTH_MODE:-admin_code}
+      ADMIN_CODE: ${ADMIN_CODE:-}
+      ROOM_CREATION_KEY: ${ROOM_CREATION_KEY:-}
+      PUBLIC_URL: ${PUBLIC_URL:-}
+      MEDIA_TRANSPORT: ${MEDIA_TRANSPORT:-websocket}
+      STUN_URLS: ${STUN_URLS:-}
+      TURN_URLS: ${TURN_URLS:-}
+      TURN_SECRET: ${TURN_SECRET:-}
+      TURN_USERNAME: ${TURN_USERNAME:-}
+      TURN_PASSWORD: ${TURN_PASSWORD:-}
+    ports:
+      - "127.0.0.1:${PORT:-8080}:8080"
+    volumes:
+      - barkodd_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+volumes:
+  barkodd_data:
+    name: barkodd_local_${AUTH_MODE:-admin_code}_data
