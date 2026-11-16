@@ -632,10 +632,13 @@ async function openRoom(role, binding, actor = authActor(), viewing = null) {
       } else if (result.kind === 'calibrating') {
         const message = `Измеряем фон… Осталось ${Math.ceil(result.remainingMs / 1000)} с. Новые шумовые события пока не создаются.`;
         if ($('calibration-feedback').textContent !== message) $('calibration-feedback').textContent = message;
+      } else if (result.kind === 'starting') {
+        $('calibration-feedback').textContent = result.message || 'Разрешите доступ к микрофону. Замер начнётся после подключения.';
       } else {
         $('calibration-feedback').textContent = result.message || 'Калибровка отменена. Порог не изменён.';
       }
-      renderSoundControls();
+      renderMedia();
+      if (result.kind === 'complete') void loadDevices();
     },
     onLocalStream(stream) {
       if (generation !== current || role !== 'host') return;
@@ -822,7 +825,7 @@ function renderMedia() {
   $('video-corner-text').textContent = isHost ? 'ЛОКАЛЬНЫЙ ПРЕДПРОСМОТР' : 'ПРЯМО СЕЙЧАС';
   $('video-mode').textContent = visible ? isHost ? 'НАБЛЮДЕНИЕ' : 'В ПРЯМОМ ЭФИРЕ' : mediaBusy ? 'ПОДКЛЮЧЕНИЕ' : !isHost && viewerListening ? 'ТОЛЬКО ЗВУК' : 'КАМЕРА ВЫКЛЮЧЕНА';
   const running = isHost ? hostRunning : viewerWatching;
-  $('capture-button').disabled = mediaBusy;
+  $('capture-button').disabled = mediaBusy || (isHost && !hostRunning && calibrationBusy());
   setButtonLabel('capture-button', mediaBusy ? 'Подключаемся…' : isHost ? running ? 'Остановить наблюдение' : 'Включить наблюдение' : running ? 'Выключить видео' : 'Включить видео');
   $('capture-button').querySelector('use').setAttribute('href', running ? '#i-stop' : '#i-play');
   $('capture-button').setAttribute('aria-pressed', String(running));
@@ -835,8 +838,8 @@ function renderMedia() {
   $('audio-status').dataset.state = audioState.kind;
   $('audio-retry').hidden = isHost || !viewerListening || audioState.kind !== 'blocked';
   $('audio-retry').disabled = mediaBusy;
-  $('video-device').disabled = isHost && (hostRunning || mediaBusy);
-  $('audio-device').disabled = isHost && (hostRunning || mediaBusy);
+  $('video-device').disabled = isHost && (hostRunning || mediaBusy || calibrationBusy());
+  $('audio-device').disabled = isHost && (hostRunning || mediaBusy || calibrationBusy());
   renderSoundControls();
   renderSoundLevel();
   const microphoneLabel = isHost && video.srcObject?.getAudioTracks()[0]?.label;
@@ -845,6 +848,11 @@ function renderMedia() {
     $('video-placeholder-title').textContent = mediaBusy ? 'Устраиваемся поудобнее' : 'Тихое место для вашего друга';
     $('video-placeholder-text').textContent = mediaBusy ? 'Разрешите доступ к камере и микрофону в браузере.' : 'Включите наблюдение, когда будете готовы. Новый запуск очистит предыдущую историю.';
     $('media-status').textContent = mediaMessage || (hostRunning ? 'Слушаем звуки и сохраняем домашние моменты' : 'Камера и микрофон выключены');
+    if (!hostRunning && calibrationBusy()) {
+      $('video-placeholder-title').textContent = calibrationState.kind === 'starting' ? 'Подключаем микрофон' : 'Измеряем фон комнаты';
+      $('video-placeholder-text').textContent = 'Камера выключена. Калибровка не меняет историю наблюдения.';
+      $('media-status').textContent = 'Только микрофон · настройка чувствительности';
+    }
   } else {
     if (!serverReachable) {
       $('video-placeholder-title').textContent = 'Проверяем связь';
@@ -900,27 +908,33 @@ function changeThreshold(threshold) {
 
 function renderSoundLevel() {
   const draft = thresholdDraft !== appliedThreshold;
+  const measuring = hostRunning || calibrationState.kind === 'calibrating';
   $('sound-level-bar').style.width = `${levelPosition(soundLevel)}%`;
-  $('sound-level-value').textContent = hostRunning ? formatLevel(soundLevel) : '—';
+  $('sound-level-value').textContent = measuring ? formatLevel(soundLevel) : '—';
   $('sound-threshold-marker').style.left = `${levelPosition(appliedThreshold)}%`;
   $('sound-threshold-marker').title = `Действующий порог: ${formatLevel(appliedThreshold)}`;
   $('sound-draft-marker').hidden = !draft;
   $('sound-draft-marker').style.left = `${levelPosition(thresholdDraft)}%`;
   $('sound-draft-marker').title = `Несохранённый порог: ${formatLevel(thresholdDraft)}`;
-  $('level-container').classList.toggle('above-threshold', hostRunning && soundLevel >= appliedThreshold);
-  $('level-container').querySelector('.level-track').setAttribute('aria-label', `Уровень звука: ${hostRunning ? formatLevel(soundLevel) : 'микрофон выключен'}. Действующий порог: ${formatLevel(appliedThreshold)}.${draft ? ` Несохранённый порог: ${formatLevel(thresholdDraft)}.` : ''}`);
+  $('level-container').classList.toggle('above-threshold', measuring && soundLevel >= appliedThreshold);
+  $('level-container').querySelector('.level-track').setAttribute('aria-label', `Уровень звука: ${measuring ? formatLevel(soundLevel) : 'микрофон выключен'}. Действующий порог: ${formatLevel(appliedThreshold)}.${draft ? ` Несохранённый порог: ${formatLevel(thresholdDraft)}.` : ''}`);
   $('threshold-hint').textContent = draft
     ? `Сплошная отметка — действующий порог ${formatLevel(appliedThreshold)}, пунктирная — новый ${formatLevel(thresholdDraft)}. Сохраните настройки, чтобы применить.`
     : `Отметка — действующий порог ${formatLevel(appliedThreshold)}. Звук выше него вызывает срабатывание.`;
 }
 
+function calibrationBusy() {
+  return calibrationState.kind === 'starting' || calibrationState.kind === 'calibrating';
+}
+
 function renderSoundControls() {
-  const calibrating = calibrationState.kind === 'calibrating';
-  $('calibrate-noise').disabled = !hostRunning || !microphoneReady || mediaBusy || settingsSaving || calibrating;
-  $('cancel-calibration').hidden = !calibrating;
-  $('calibration-progress').hidden = !calibrating;
-  $('calibration-progress').value = calibrating ? calibrationState.progress : 0;
-  for (const id of ['save-settings', 'sensitivity', 'threshold-adjustment', 'snapshot-interval']) $(id).disabled = settingsSaving || calibrating;
+  const busy = calibrationBusy();
+  $('calibrate-noise').disabled = active?.role !== 'host' || !settingsLoaded || (hostRunning && !microphoneReady) || mediaBusy || settingsSaving || busy;
+  $('cancel-calibration').hidden = !busy;
+  $('calibration-progress').hidden = !busy;
+  if (calibrationState.kind === 'starting') $('calibration-progress').removeAttribute('value');
+  else $('calibration-progress').value = calibrationState.kind === 'calibrating' ? calibrationState.progress : 0;
+  for (const id of ['save-settings', 'sensitivity', 'threshold-adjustment', 'snapshot-interval']) $(id).disabled = settingsSaving || busy;
 }
 
 async function loadDevices() {
@@ -1103,6 +1117,7 @@ async function openPhoto(event) {
 async function toggleCapture() {
   if (!monitor || mediaBusy) return;
   if (active.role === 'viewer') return setViewerChannels(!viewerWatching, viewerListening);
+  if (!hostRunning && calibrationBusy()) return;
   const current = generation;
   const currentMonitor = monitor;
   const isHost = active.role === 'host';
@@ -1269,17 +1284,19 @@ $('sensitivity').addEventListener('change', () => {
 });
 $('threshold-adjustment').addEventListener('input', () => changeThreshold(sliderToThreshold(Number($('threshold-adjustment').value))));
 $('calibrate-noise').addEventListener('click', () => {
-  if (!settingsSaving && active?.role === 'host') monitor?.startCalibration();
+  if (!settingsSaving && !mediaBusy && !calibrationBusy() && active?.role === 'host') {
+    monitor?.startCalibration({ audioDeviceId: $('audio-device').value || undefined });
+  }
 });
 $('cancel-calibration').addEventListener('click', () => monitor?.cancelCalibration());
 $('audio-device').addEventListener('change', () => {
   monitor?.cancelCalibration();
-  $('calibration-feedback').textContent = 'Микрофон изменён. Включите наблюдение и повторите калибровку для нового микрофона.';
+  $('calibration-feedback').textContent = 'Микрофон изменён. Повторите калибровку для нового микрофона.';
 });
 $('snapshot-interval').addEventListener('change', () => { settingsDirty = true; $('settings-feedback').textContent = 'Есть несохранённые изменения'; });
 $('settings-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (!api || !active || active.role !== 'host' || settingsSaving || calibrationState.kind === 'calibrating') return;
+  if (!api || !active || active.role !== 'host' || settingsSaving || calibrationBusy()) return;
   const current = generation;
   settingsSaving = true;
   renderSoundControls();

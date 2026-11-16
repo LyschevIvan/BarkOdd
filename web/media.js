@@ -12,6 +12,7 @@ const TURN_REFRESH_MS = 45 * 60 * 1000;
 
 export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLevel = noop, onInputStatus = noop, onCalibration = noop, onLocalStream = noop, onFrame = noop, onTransport = noop, onRemoteStream = noop, onError = noop }) {
   let host = null;
+  let calibrationPreview = null;
   let viewer = null;
   let destroyed = false;
   let lastStatus = '';
@@ -454,7 +455,131 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     emit(onInputStatus, { available: !message, message });
   }
 
-  function startCalibration() {
+  function finishCalibrationPreview(state, result) {
+    if (!state?.active) return;
+    state.active = false;
+    const current = calibrationPreview === state;
+    if (current) calibrationPreview = null;
+    for (const timer of state.timers) clearTimeout(timer);
+    state.timers.clear();
+    for (const [target, type, listener] of state.listeners) target.removeEventListener(type, listener);
+    state.listeners.length = 0;
+    state.stream?.getTracks().forEach(track => track.stop());
+    state.source?.disconnect();
+    state.analyser?.disconnect();
+    if (state.audio) void state.audio.close().catch(noop);
+    if (!current || destroyed) return;
+    inputStatus(state, 'Микрофон выключен.');
+    emit(onLevel, 0);
+    emit(onCalibration, result);
+  }
+
+  function previewInputIssue(state) {
+    if (state.audio.state !== 'running') return 'Браузер приостановил звук. Вернитесь к вкладке и повторите калибровку.';
+    const tracks = state.stream.getAudioTracks();
+    if (!tracks.some(track => track.readyState === 'live' && track.enabled && !track.muted)) {
+      return 'Микрофон недоступен или выключен. Проверьте его и повторите калибровку.';
+    }
+    return null;
+  }
+
+  function sampleCalibrationPreview(state) {
+    if (!state.active || calibrationPreview !== state) return;
+    try {
+      const issue = previewInputIssue(state);
+      if (issue) {
+        finishCalibrationPreview(state, { kind: 'error', message: issue });
+        return;
+      }
+      state.analyser.getFloatTimeDomainData(state.samples);
+      let squares = 0;
+      for (const value of state.samples) squares += value * value;
+      const level = Math.min(1, Math.sqrt(squares / state.samples.length));
+      inputStatus(state);
+      emit(onLevel, level);
+      const result = state.calibration.add(level, now());
+      if (result.kind === 'calibrating') emit(onCalibration, result);
+      else finishCalibrationPreview(state, result);
+    } catch (_) {
+      finishCalibrationPreview(state, { kind: 'error', message: 'Не удалось измерить фон. Проверьте микрофон и повторите калибровку.' });
+    }
+    later(state, 50, () => sampleCalibrationPreview(state));
+  }
+
+  function calibrationMicrophoneError(cause) {
+    const explanations = {
+      NotAllowedError: 'Разрешите доступ к микрофону в настройках браузера и повторите калибровку.',
+      NotFoundError: 'Микрофон не найден. Подключите его и повторите калибровку.',
+      NotReadableError: 'Не удалось включить микрофон. Проверьте, не занят ли он другим приложением.',
+      OverconstrainedError: 'Выбранный микрофон недоступен. Выберите другой микрофон.',
+    };
+    return { kind: 'error', message: explanations[cause?.name] || cause?.message || 'Не удалось включить микрофон. Повторите калибровку.' };
+  }
+
+  async function openCalibrationMicrophone(state, audioDeviceId) {
+    const current = () => state.active && calibrationPreview === state && !destroyed;
+    const listen = (target, type, listener) => {
+      target.addEventListener(type, listener);
+      state.listeners.push([target, type, listener]);
+    };
+    try {
+      listen(document, 'visibilitychange', () => {
+        if (document.visibilityState !== 'visible') finishCalibrationPreview(state, { kind: 'cancelled', message: 'Калибровка отменена: вкладка скрыта. Вернитесь и повторите замер.' });
+      });
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('Микрофон доступен только через HTTPS или localhost.');
+      const Audio = globalThis.AudioContext || globalThis.webkitAudioContext;
+      if (!Audio) throw new Error('Этот браузер не поддерживает обработку звука.');
+      state.audio = new Audio();
+      // Start resuming within the click activation; permission and resume may
+      // settle in either order. Neither consumes the five-second sample window.
+      const resumed = Promise.resolve(state.audio.resume()).then(() => true, cause => {
+        if (current()) finishCalibrationPreview(state, calibrationMicrophoneError(cause));
+        return false;
+      });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: false,
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, ...(audioDeviceId ? { deviceId: { exact: audioDeviceId } } : {}) },
+      });
+      if (!current()) { stream.getTracks().forEach(track => track.stop()); return; }
+      state.stream = stream;
+      for (const track of stream.getAudioTracks()) {
+        for (const type of ['ended', 'mute']) listen(track, type, () => {
+          finishCalibrationPreview(state, { kind: 'error', message: 'Доступ к микрофону прерван. Проверьте его и повторите калибровку.' });
+        });
+      }
+      if (!await resumed || !current()) return;
+      const issue = previewInputIssue(state);
+      if (issue) { finishCalibrationPreview(state, { kind: 'error', message: issue }); return; }
+      listen(state.audio, 'statechange', () => {
+        if (state.audio.state !== 'running') finishCalibrationPreview(state, { kind: 'error', message: 'Браузер приостановил звук. Вернитесь к вкладке и повторите калибровку.' });
+      });
+      state.source = state.audio.createMediaStreamSource(stream);
+      state.analyser = state.audio.createAnalyser();
+      state.analyser.fftSize = 2048;
+      state.analyser.smoothingTimeConstant = 0;
+      state.samples = new Float32Array(state.analyser.fftSize);
+      state.source.connect(state.analyser);
+      state.calibration = new NoiseCalibration(now());
+      emit(onCalibration, { kind: 'calibrating', remainingMs: CALIBRATION_DURATION_MS, progress: 0 });
+      sampleCalibrationPreview(state);
+    } catch (cause) {
+      if (current()) finishCalibrationPreview(state, calibrationMicrophoneError(cause));
+    }
+  }
+
+  function startCalibration({ audioDeviceId } = {}) {
+    if (destroyed || calibrationPreview?.active) return false;
+    if (!host?.active) {
+      if (document.visibilityState !== 'visible') {
+        emit(onCalibration, { kind: 'error', message: 'Откройте вкладку устройства питомца для калибровки.' });
+        return false;
+      }
+      const state = { active: true, timers: new Set(), listeners: [] };
+      calibrationPreview = state;
+      emit(onCalibration, { kind: 'starting', message: 'Включаем микрофон. Разрешите доступ к нему в браузере…' });
+      void openCalibrationMicrophone(state, audioDeviceId);
+      return true;
+    }
     const state = host;
     if (!state?.active || !state.stream || state.calibration) return false;
     const issue = audioInputIssue(state);
@@ -469,6 +594,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
   }
 
   function cancelCalibration() {
+    finishCalibrationPreview(calibrationPreview, { kind: 'cancelled', message: 'Калибровка отменена. Порог не изменён.' });
     finishCalibration(host, { kind: 'cancelled', message: 'Калибровка отменена. Порог не изменён.' });
   }
 
@@ -597,6 +723,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
   async function startHost({ videoDeviceId, videoFacingMode, audioDeviceId, settings } = {}) {
     if (destroyed) throw new Error('Наблюдение уже закрыто');
     if (host?.active) return;
+    cancelCalibration();
     const state = session();
     host = state;
     state.role = 'host';
@@ -673,9 +800,9 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
   }
 
   async function stopHost() {
+    cancelCalibration();
     const state = host;
     if (!state) return;
-    cancelCalibration();
     inputStatus(state, 'Микрофон выключен.');
     host = null;
     stopSession(state);

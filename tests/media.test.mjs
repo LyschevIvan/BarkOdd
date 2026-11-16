@@ -21,7 +21,7 @@ function eventResult(body, photoAt = body.photoAt ?? null) {
   return { id: body.episodeId, startedAt: body.detectedAt, lastNoiseAt: body.detectedAt, photoAt, hasPhoto: !!photoAt, level: body.level };
 }
 
-function environment({ muted = false, enabled = true, audioLevel = 0.25, videoReady = false, encodeDelay = 0, frameBytes = 12000, deferredMedia = false, deferredWake = false, rtc = false } = {}) {
+function environment({ muted = false, enabled = true, audioLevel = 0.25, videoReady = false, encodeDelay = 0, frameBytes = 12000, deferredMedia = false, separateMedia = false, deferredWake = false, rtc = false } = {}) {
   const originals = new Map();
   const replace = (name, value) => {
     originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
@@ -50,8 +50,11 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
   const mediaConstraints = [];
   const calibrations = [];
   const inputStatuses = [];
+  const mediaStreams = [];
+  const audioContexts = [];
+  const audioNodes = [];
+  const mediaPending = [];
   let mediaRequests = 0;
-  let pendingMedia, rejectMedia;
   let pendingWake;
   let releasedLocks = 0;
   let heartbeatResponse = () => Promise.resolve();
@@ -85,10 +88,14 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     getAudioTracks: () => [microphone],
     getVideoTracks: () => [camera],
   };
-  const node = () => ({ connect() {}, disconnect() {} });
+  const node = () => {
+    const value = { connect() {}, disconnect() { this.disconnected = true; } };
+    audioNodes.push(value);
+    return value;
+  };
   let audioContext;
   class AudioContext {
-    constructor() { target(this); this.state = 'running'; this.sampleRate = 48000; this.destination = node(); this.audioWorklet = { addModule: async () => {} }; audioContext = this; }
+    constructor() { target(this); this.state = 'running'; this.sampleRate = 48000; this.destination = node(); this.audioWorklet = { addModule: async () => {} }; audioContext = this; audioContexts.push(this); }
     get currentTime() { return time / 1000; }
     createMediaStreamSource() { return node(); }
     createGain() { return { ...node(), gain: { value: 1 } }; }
@@ -96,7 +103,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     createBufferSource() { const source = { ...node(), start(at) { this.at = at; playbacks.push(this); }, stop() { this.stopped = true; } }; return source; }
     createAnalyser() {
       // Retained samples must not become an event while their input is muted.
-      return { ...node(), getFloatTimeDomainData: samples => samples.fill(audioLevel) };
+      return Object.assign(node(), { getFloatTimeDomainData: samples => samples.fill(audioLevel) });
     }
     resume() { this.state = 'running'; return resumeResponse ? resumeResponse(this) : Promise.resolve(); }
     close() { this.state = 'closed'; return Promise.resolve(); }
@@ -122,8 +129,16 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     mediaDevices: { getUserMedia: constraints => {
       mediaRequests++;
       mediaConstraints.push(constraints);
-      if (!deferredMedia) return Promise.resolve(stream);
-      return new Promise((resolve, reject) => { pendingMedia = resolve; rejectMedia = reject; });
+      const audioTrack = separateMedia ? track('audio') : microphone;
+      const videoTrack = separateMedia ? track('video') : camera;
+      const captureStream = !separateMedia && constraints.video !== false ? stream : {
+        getTracks: () => constraints.video === false ? [audioTrack] : [videoTrack, audioTrack],
+        getAudioTracks: () => [audioTrack],
+        getVideoTracks: () => constraints.video === false ? [] : [videoTrack],
+      };
+      mediaStreams.push(captureStream);
+      if (!deferredMedia) return Promise.resolve(captureStream);
+      return new Promise((resolve, reject) => { mediaPending.push({ resolve, reject, stream: captureStream }); });
     } },
     wakeLock: { request: () => deferredWake ? new Promise(resolve => { pendingWake = resolve; }) : Promise.resolve(wakeLock) },
   });
@@ -212,7 +227,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     await settle();
   };
   return {
-    monitor, levels, posts, errors, statuses, frames, sockets, encodes, canvases, peers, localStreams, transports, remoteStreams, stream, advance, settle, audioStatuses, playbacks, worklets, mediaConstraints, calibrations, inputStatuses,
+    monitor, levels, posts, errors, statuses, frames, sockets, encodes, canvases, videos, peers, localStreams, transports, remoteStreams, stream, advance, settle, audioStatuses, playbacks, worklets, mediaConstraints, calibrations, inputStatuses, mediaStreams, audioContexts, audioNodes,
     mediaRequests: () => mediaRequests,
     openSocket(role) {
       assert.ok(sockets.length > 0, 'monitor must connect to the WebSocket endpoint');
@@ -226,8 +241,8 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     onSnapshot(callback) { snapshotResponse = callback; },
     onResume(callback) { resumeResponse = callback; },
     onAudioPlay(callback) { audioPlayResponse = callback; },
-    resolveMedia() { pendingMedia(stream); },
-    denyMedia() { rejectMedia(Object.assign(new Error('permission denied'), { name: 'NotAllowedError' })); },
+    resolveMedia(index = mediaPending.length - 1) { mediaPending[index].resolve(mediaPending[index].stream); },
+    denyMedia(index = mediaPending.length - 1) { mediaPending[index].reject(Object.assign(new Error('permission denied'), { name: 'NotAllowedError' })); },
     resolveWake() { pendingWake(wakeLock); },
     releasedLocks: () => releasedLocks,
     timerCount: () => timers.size,
@@ -301,6 +316,156 @@ await test('raising sensitivity detects quiet input live and preserves the measu
   assert.ok(Math.abs(events[0].body.level - 0.002) < 0.000001, 'sensitivity must not amplify stored levels');
 });
 
+await test('standalone calibration requests only the selected microphone and never starts observation', { audioLevel: 0.001 }, async env => {
+  assert.equal(env.monitor.startCalibration({ audioDeviceId: 'selected-microphone' }), true);
+  assert.equal(env.calibrations[0].kind, 'starting');
+  assert.match(env.calibrations[0].message, /микрофон/i);
+  assert.equal(env.monitor.startCalibration(), false, 'a repeated click must not open another microphone');
+  assert.deepEqual(env.mediaConstraints, [{ video: false, audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, deviceId: { exact: 'selected-microphone' } } }]);
+  await env.advance(4950);
+  assert.equal(env.calibrations[env.calibrations.length - 1].kind, 'calibrating');
+  assert.ok(env.levels.some(level => Math.abs(level - 0.001) < 0.000001));
+  assert.ok(env.inputStatuses.some(value => value.available));
+  await env.advance(50);
+  const result = env.calibrations[env.calibrations.length - 1];
+  assert.equal(result.kind, 'complete');
+  assert.ok(Math.abs(result.threshold - 0.002) < 0.000001);
+  assert.deepEqual(env.posts, [], 'standalone sampling must not send heartbeats, events or history updates');
+  assert.deepEqual(env.sockets, []);
+  assert.deepEqual(env.localStreams, []);
+  assert.deepEqual(env.videos, []);
+  assert.deepEqual(env.canvases, []);
+  assert.equal(env.mediaRequests(), 1);
+  assert.equal(env.mediaStreams[0].getAudioTracks()[0].readyState, 'ended');
+  assert.equal(env.stream.getVideoTracks()[0].readyState, 'live', 'unrequested camera is untouched');
+  assert.equal(env.audioContexts[0].state, 'closed');
+  assert.equal(env.audioNodes.filter(node => node.disconnected).length, 2, 'source and analyser disconnect');
+  assert.equal(env.timerCount(), 0);
+  assert.equal(env.levels[env.levels.length - 1], 0);
+  assert.equal(env.inputStatuses[env.inputStatuses.length - 1].available, false);
+});
+
+await test('standalone calibration starts its five seconds after permission and audio resume are ready', { audioLevel: 0.001, deferredMedia: true }, async env => {
+  let releaseResume;
+  let resumes = 0;
+  env.onResume(context => {
+    resumes++;
+    context.state = 'suspended';
+    return new Promise(resolve => { releaseResume = () => { context.state = 'running'; resolve(); }; });
+  });
+  assert.equal(env.monitor.startCalibration(), true);
+  assert.equal(resumes, 1, 'resume belongs to the synchronous click activation');
+  await env.advance(6000);
+  assert.equal(env.calibrations[env.calibrations.length - 1].kind, 'starting');
+  env.resolveMedia();
+  await env.advance(1000);
+  assert.equal(env.calibrations[env.calibrations.length - 1].kind, 'starting');
+  releaseResume();
+  await env.advance(4950);
+  assert.equal(env.calibrations[env.calibrations.length - 1].kind, 'calibrating');
+  await env.advance(50);
+  assert.equal(env.calibrations[env.calibrations.length - 1].kind, 'complete');
+  assert.deepEqual(env.posts, []);
+});
+
+await test('standalone calibration denial reports only microphone permission and releases its context', { deferredMedia: true }, async env => {
+  assert.equal(env.monitor.startCalibration(), true);
+  env.denyMedia();
+  await env.settle();
+  const result = env.calibrations[env.calibrations.length - 1];
+  assert.equal(result.kind, 'error');
+  assert.match(result.message, /микрофон/i);
+  assert.doesNotMatch(result.message, /камер/i);
+  assert.equal(env.audioContexts[0].state, 'closed');
+  assert.deepEqual(env.posts, []);
+  assert.equal(env.timerCount(), 0);
+});
+
+for (const interruption of ['cancel', 'stopHost', 'destroy', 'hide', 'mute', 'disabled', 'ended', 'suspend']) {
+  await test(`standalone calibration (${interruption}) releases microphone and cannot complete later`, { audioLevel: 0.001 }, async env => {
+    assert.equal(env.monitor.startCalibration(), true);
+    await env.advance(1000);
+    const track = env.mediaStreams[0].getAudioTracks()[0];
+    if (interruption === 'cancel') env.monitor.cancelCalibration();
+    if (interruption === 'stopHost') await env.monitor.stopHost();
+    if (interruption === 'destroy') await env.monitor.destroy();
+    if (interruption === 'hide') { document.visibilityState = 'hidden'; document.dispatchEvent({ type: 'visibilitychange' }); }
+    if (interruption === 'mute') env.setMuted(true);
+    if (interruption === 'disabled') env.setEnabled(false);
+    if (interruption === 'ended') { track.readyState = 'ended'; track.dispatchEvent({ type: 'ended' }); }
+    if (interruption === 'suspend') env.transitionAudio('suspended');
+    await env.advance(50);
+    assert.equal(track.readyState, 'ended');
+    assert.equal(env.audioContexts[0].state, 'closed');
+    assert.equal(env.timerCount(), 0);
+    assert.equal(env.calibrations.some(value => value.kind === 'complete'), false);
+    const callbacks = [env.calibrations.length, env.levels.length, env.inputStatuses.length];
+    await env.advance(6000);
+    track.dispatchEvent({ type: 'mute' });
+    env.audioContexts[0].dispatchEvent({ type: 'statechange' });
+    document.dispatchEvent({ type: 'visibilitychange' });
+    assert.deepEqual([env.calibrations.length, env.levels.length, env.inputStatuses.length], callbacks, 'retired listeners must not publish anything');
+    assert.deepEqual(env.posts, []);
+  });
+}
+
+for (const interruption of ['cancel', 'stopHost', 'destroy', 'hide']) {
+  await test(`pending standalone permission (${interruption}) stops a late stream without publishing callbacks`, { deferredMedia: true }, async env => {
+    assert.equal(env.monitor.startCalibration(), true);
+    if (interruption === 'cancel') env.monitor.cancelCalibration();
+    if (interruption === 'stopHost') await env.monitor.stopHost();
+    if (interruption === 'destroy') await env.monitor.destroy();
+    if (interruption === 'hide') { document.visibilityState = 'hidden'; document.dispatchEvent({ type: 'visibilitychange' }); }
+    assert.equal(env.audioContexts[0].state, 'closed');
+    const callbacks = [env.calibrations.length, env.levels.length, env.inputStatuses.length];
+    env.resolveMedia();
+    await env.advance(6000);
+    assert.equal(env.mediaStreams[0].getAudioTracks()[0].readyState, 'ended');
+    assert.deepEqual([env.calibrations.length, env.levels.length, env.inputStatuses.length], callbacks);
+    assert.deepEqual(env.posts, []);
+    assert.deepEqual(env.localStreams, []);
+    assert.equal(env.timerCount(), 0);
+    if (interruption === 'destroy') assert.equal(env.monitor.startCalibration(), false);
+  });
+}
+
+await test('a late cancelled microphone cannot stop or zero a replacement calibration', { deferredMedia: true, separateMedia: true, audioLevel: 0.001 }, async env => {
+  assert.equal(env.monitor.startCalibration(), true);
+  env.monitor.cancelCalibration();
+  assert.equal(env.monitor.startCalibration(), true);
+  env.resolveMedia(1);
+  await env.advance(1000);
+  const callbacks = [env.calibrations.length, env.levels.length, env.inputStatuses.length];
+  env.resolveMedia(0);
+  await env.settle();
+  assert.deepEqual([env.calibrations.length, env.levels.length, env.inputStatuses.length], callbacks);
+  assert.equal(env.mediaStreams[0].getAudioTracks()[0].readyState, 'ended');
+  assert.equal(env.mediaStreams[1].getAudioTracks()[0].readyState, 'live');
+  assert.equal(env.audioContexts[1].state, 'running');
+  await env.advance(4000);
+  assert.equal(env.calibrations.filter(value => value.kind === 'complete').length, 1);
+});
+
+await test('starting observation cancels a pending standalone microphone without late cleanup affecting the host', { deferredMedia: true, separateMedia: true, audioLevel: 0.001 }, async env => {
+  assert.equal(env.monitor.startCalibration(), true);
+  const starting = env.monitor.startHost();
+  assert.equal(env.calibrations[env.calibrations.length - 1].kind, 'cancelled');
+  assert.equal(env.audioContexts[0].state, 'closed');
+  assert.equal(env.monitor.startCalibration(), false, 'calibration cannot overlap a host device request');
+  env.resolveMedia(1);
+  await starting;
+  await env.advance(50);
+  const callbacks = [env.calibrations.length, env.levels.length, env.inputStatuses.length];
+  env.resolveMedia(0);
+  await env.settle();
+  assert.deepEqual([env.calibrations.length, env.levels.length, env.inputStatuses.length], callbacks);
+  assert.equal(env.mediaStreams[0].getAudioTracks()[0].readyState, 'ended');
+  assert.ok(env.mediaStreams[1].getTracks().every(track => track.readyState === 'live'));
+  assert.equal(env.audioContexts[1].state, 'running');
+  assert.deepEqual(env.localStreams, [env.mediaStreams[1]]);
+  assert.ok(env.posts.some(post => post.path === '/heartbeat'));
+});
+
 await test('calibration samples background without events or stream restart and only proposes a threshold', { audioLevel: 0.001 }, async env => {
   await env.monitor.startHost({ settings: { threshold: 0.0005 } });
   await env.settle();
@@ -354,7 +519,6 @@ await test('cancelled calibration preserves queued events and the next photo dea
 for (const interruption of ['mute', 'suspend', 'hide', 'stop']) {
   await test(`calibration interruption (${interruption}) cannot complete with stale or unavailable input`, { audioLevel: 0.001 }, async env => {
     assert.equal(typeof env.monitor.startCalibration, 'function');
-    assert.equal(env.monitor.startCalibration(), false, 'stopped capture cannot calibrate');
     await env.monitor.startHost();
     assert.equal(env.monitor.startCalibration(), true);
     await env.advance(1000);

@@ -2,13 +2,22 @@ import { test, expect } from '@playwright/test';
 
 const roomURLs = new WeakMap();
 
-async function syntheticMicrophone(page, amplitude = 0.0014) {
-  await page.addInitScript(level => {
+async function syntheticMicrophone(page, amplitude = 0.0014, options = {}) {
+  await page.addInitScript(({ level, options }) => {
     const NativeAudio = window.AudioContext;
     window.__syntheticMicrophoneRequests = 0;
+    window.__syntheticMicrophoneConstraints = [];
+    window.__syntheticMicrophoneSources = [];
+    window.__syntheticMicrophonePermission = options.permission || 'granted';
     // Supply a real Web Audio graph and canvas track; never open real devices.
-    navigator.mediaDevices.getUserMedia = async () => {
+    navigator.mediaDevices.getUserMedia = async constraints => {
       window.__syntheticMicrophoneRequests++;
+      window.__syntheticMicrophoneConstraints.push(constraints);
+      if (options.rejectVideo && constraints.video) throw new DOMException('Camera access denied', 'NotAllowedError');
+      if (window.__syntheticMicrophonePermission === 'denied') throw new DOMException('Microphone access denied', 'NotAllowedError');
+      if (window.__syntheticMicrophonePermission === 'pending') {
+        await new Promise(resolve => { window.__releaseMicrophonePermission = resolve; });
+      }
       const audio = new NativeAudio();
       const oscillator = audio.createOscillator();
       const gain = audio.createGain();
@@ -18,22 +27,25 @@ async function syntheticMicrophone(page, amplitude = 0.0014) {
       gain.connect(destination);
       oscillator.start();
       await audio.resume();
-      const canvas = document.createElement('canvas');
-      canvas.width = 320;
-      canvas.height = 240;
-      const draw = () => {
-        const context = canvas.getContext('2d');
-        context.fillStyle = '#468';
-        context.fillRect(0, 0, 320, 240);
-        requestAnimationFrame(draw);
-      };
-      draw();
-      const stream = canvas.captureStream(10);
-      stream.addTrack(destination.stream.getAudioTracks()[0]);
+      const stream = new MediaStream(destination.stream.getAudioTracks());
+      if (constraints.video) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 320;
+        canvas.height = 240;
+        const draw = () => {
+          const context = canvas.getContext('2d');
+          context.fillStyle = '#468';
+          context.fillRect(0, 0, 320, 240);
+          requestAnimationFrame(draw);
+        };
+        draw();
+        stream.addTrack(canvas.captureStream(10).getVideoTracks()[0]);
+      }
       window.__syntheticMicrophone = { audio, stream, gain };
+      window.__syntheticMicrophoneSources.push(window.__syntheticMicrophone);
       return stream;
     };
-  }, amplitude);
+  }, { level: amplitude, options });
 }
 
 async function createHost(page, baseURL, name) {
@@ -95,19 +107,131 @@ async function startCalibration(page) {
 
 test.afterEach(async ({ page }) => {
   await page.evaluate(async () => {
-    const source = window.__syntheticMicrophone;
-    if (!source) return;
-    source.stream.getTracks().forEach(track => track.stop());
-    if (source.audio.state !== 'closed') await source.audio.close();
+    for (const source of window.__syntheticMicrophoneSources || []) {
+      source.stream.getTracks().forEach(track => track.stop());
+      if (source.audio.state !== 'closed') await source.audio.close();
+    }
   }).catch(() => {});
   const url = roomURLs.get(page);
   if (url) await page.request.delete(url, { headers: { Origin: new URL(url).origin } });
 });
 
+test('standalone calibration uses only the microphone and preserves existing history before saving', async ({ page, baseURL }) => {
+  await syntheticMicrophone(page, 0.0014, { rejectVideo: true });
+  const { url, state } = await createHost(page, baseURL, 'Microphone-only calibration');
+  const headers = { Origin: new URL(baseURL).origin };
+  const sessionId = 'prior-observation';
+  // Seed real server history, then stop that source. Calibration must leave it intact.
+  expect((await page.request.post(`${url}/heartbeat`, { headers, data: { sessionId, monitoring: true } })).ok()).toBe(true);
+  expect((await page.request.post(`${url}/events`, { headers, data: { sessionId, episodeId: 'existing-noise', level: 0.2 } })).ok()).toBe(true);
+  expect((await page.request.post(`${url}/heartbeat`, { headers, data: { sessionId, monitoring: false, stopped: true } })).ok()).toBe(true);
+  const before = await state();
+  expect(before.events).toHaveLength(1);
+  const mutations = [];
+  page.on('request', request => {
+    if (request.url().startsWith(url) && request.method() !== 'GET') mutations.push(`${request.method()} ${request.url()}`);
+  });
+
+  await expect(page.locator('#calibrate-noise')).toBeEnabled({ timeout: 3000 });
+  const calibrationStartedAt = await page.evaluate(() => performance.now());
+  await page.locator('#calibrate-noise').click();
+  await expect(page.locator('#cancel-calibration')).toBeVisible();
+  await expect.poll(() => page.locator('#calibration-progress').evaluate(element => element.value)).toBeGreaterThan(0);
+  await expect.poll(async () => parseFloat((await page.locator('#sound-level-value').textContent()).replace(',', '.'))).toBeGreaterThan(0);
+  for (const control of ['capture-button', 'video-device', 'audio-device', 'save-settings']) {
+    await expect(page.locator(`#${control}`)).toBeDisabled();
+  }
+  await expect(page.locator('#capture-button')).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#camera-video')).toBeHidden();
+  expect(await page.locator('#camera-video').evaluate(element => element.srcObject === null)).toBe(true);
+  const constraints = await page.evaluate(() => window.__syntheticMicrophoneConstraints);
+  expect(constraints).toHaveLength(1);
+  expect(constraints[0].video).toBe(false);
+  expect(constraints[0].audio).toBeTruthy();
+  expect(await page.evaluate(() => window.__syntheticMicrophone.stream.getVideoTracks().length)).toBe(0);
+
+  await expect(page.locator('#sensitivity')).toHaveValue('custom', { timeout: 9000 });
+  // The separately created synthetic source has its own audio clock, which can
+  // lag wall time during initialization. Calibration uses the monotonic clock.
+  expect(await page.evaluate(() => performance.now()) - calibrationStartedAt).toBeGreaterThanOrEqual(5000);
+  await expect(page.locator('#cancel-calibration')).toBeHidden();
+  await expect(page.locator('#calibrate-noise')).toBeEnabled();
+  await expect.poll(() => page.evaluate(() => window.__syntheticMicrophone.stream.getTracks().every(track => track.readyState === 'ended'))).toBe(true);
+  await expect(page.locator('#sound-draft-marker')).toBeVisible();
+  const after = await state();
+  for (const key of ['events', 'eventCount', 'historyVersion', 'lastNoiseAt', 'lastSeenAt', 'sessionId', 'monitoring', 'settings']) {
+    expect(after[key], key).toEqual(before[key]);
+  }
+  expect(after.monitoring).toBe(false);
+  expect(mutations).toEqual([]);
+  await saveSettings(page, url);
+  const exactThreshold = (await state()).settings.threshold;
+  expect(exactThreshold).toBeGreaterThan(0.0018);
+  expect(exactThreshold).toBeLessThan(0.0022);
+  await page.reload();
+  await expect(page.locator('#dashboard')).toBeVisible();
+  await expect(page.locator('#sensitivity')).toHaveValue('custom');
+  expect((await state()).settings.threshold).toBe(exactThreshold);
+  expect((await state()).events).toEqual(before.events);
+});
+
+test('standalone cancellation releases a late permission stream without replacing the draft', async ({ page, baseURL }) => {
+  await syntheticMicrophone(page, 0.0014, { rejectVideo: true, permission: 'pending' });
+  const { state } = await createHost(page, baseURL, 'Cancelled microphone permission');
+  await adjustThreshold(page, 40);
+  const draft = await page.locator('#threshold-value').textContent();
+  await expect(page.locator('#calibrate-noise')).toBeEnabled({ timeout: 3000 });
+  await page.locator('#calibrate-noise').click();
+  await expect.poll(() => page.evaluate(() => window.__syntheticMicrophoneRequests)).toBe(1);
+  await expect(page.locator('#cancel-calibration')).toBeVisible();
+  for (const control of ['capture-button', 'video-device', 'audio-device', 'save-settings']) {
+    await expect(page.locator(`#${control}`)).toBeDisabled();
+  }
+  await page.locator('#cancel-calibration').click();
+  await expect(page.locator('#cancel-calibration')).toBeHidden();
+  await expect(page.locator('#calibrate-noise')).toBeEnabled();
+  await expect(page.locator('#capture-button')).toBeEnabled();
+  await page.evaluate(() => { window.__releaseMicrophonePermission(); });
+  await expect.poll(() => page.evaluate(() => window.__syntheticMicrophoneSources.length)).toBe(1);
+  await expect.poll(() => page.evaluate(() => window.__syntheticMicrophone.stream.getTracks().every(track => track.readyState === 'ended'))).toBe(true);
+  await expect(page.locator('#threshold-adjustment')).toHaveValue('40');
+  await expect(page.locator('#threshold-value')).toHaveText(draft);
+  await expect(page.locator('#calibration-feedback')).toContainText(/отмен/i);
+  expect(await page.locator('#camera-video').evaluate(element => element.srcObject === null)).toBe(true);
+  expect((await state()).settings.threshold).toBe(0.01);
+  expect((await state()).monitoring).toBe(false);
+});
+
+test('standalone microphone denial preserves the draft and permits retry', async ({ page, baseURL }) => {
+  await syntheticMicrophone(page, 0.0014, { rejectVideo: true, permission: 'denied' });
+  const { state } = await createHost(page, baseURL, 'Retry microphone permission');
+  await adjustThreshold(page, 40);
+  const draft = await page.locator('#threshold-value').textContent();
+  await expect(page.locator('#calibrate-noise')).toBeEnabled({ timeout: 3000 });
+  await page.locator('#calibrate-noise').click();
+  await expect(page.locator('#calibration-feedback')).toContainText(/микрофон/i);
+  await expect(page.locator('#calibration-feedback')).toContainText(/доступ|разреш/i);
+  await expect(page.locator('#calibrate-noise')).toBeEnabled();
+  await expect(page.locator('#cancel-calibration')).toBeHidden();
+  await expect(page.locator('#threshold-adjustment')).toHaveValue('40');
+  await expect(page.locator('#threshold-value')).toHaveText(draft);
+  expect((await state()).settings.threshold).toBe(0.01);
+  await page.evaluate(() => { window.__syntheticMicrophonePermission = 'granted'; });
+  await page.locator('#calibrate-noise').click();
+  await expect.poll(() => page.locator('#calibration-progress').evaluate(element => element.value)).toBeGreaterThan(0);
+  await expect.poll(async () => parseFloat((await page.locator('#sound-level-value').textContent()).replace(',', '.'))).toBeGreaterThan(0);
+  await page.locator('#cancel-calibration').click();
+  await expect(page.locator('#calibrate-noise')).toBeEnabled();
+  await expect.poll(() => page.evaluate(() => window.__syntheticMicrophone.stream.getTracks().every(track => track.readyState === 'ended'))).toBe(true);
+  await expect(page.locator('#threshold-value')).toHaveText(draft);
+  expect(await page.evaluate(() => window.__syntheticMicrophoneRequests)).toBe(2);
+  expect((await state()).monitoring).toBe(false);
+});
+
 test('calibration suppresses new events and saves a threshold that rejects background but detects louder sound', async ({ page, baseURL }) => {
   await syntheticMicrophone(page);
   const { url, state } = await createHost(page, baseURL, 'Calibrated background');
-  await expect(page.locator('#calibrate-noise')).toBeDisabled();
+  await expect(page.locator('#calibrate-noise')).toBeEnabled();
   await expect(page.locator('#calibration-feedback')).toHaveAttribute('role', 'status');
   await page.locator('#sensitivity').selectOption('0.0005');
   await page.locator('#snapshot-interval').selectOption('10000');
@@ -217,7 +341,7 @@ test('cancelling calibration or stopping capture preserves an existing unsaved t
   expect((await state()).settings.threshold).toBe(0.01);
   await startCalibration(page);
   await page.locator('#capture-button').click();
-  await expect(page.locator('#calibrate-noise')).toBeDisabled();
+  await expect(page.locator('#calibrate-noise')).toBeEnabled();
   await expect(page.locator('#cancel-calibration')).toBeHidden();
   await expect(page.locator('#calibration-progress')).toBeHidden();
   await expect(page.locator('#threshold-adjustment')).toHaveValue('40');
