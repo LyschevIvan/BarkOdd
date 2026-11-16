@@ -48,6 +48,8 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
   const playbacks = [];
   const worklets = [];
   const mediaConstraints = [];
+  const calibrations = [];
+  const inputStatuses = [];
   let mediaRequests = 0;
   let pendingMedia, rejectMedia;
   let pendingWake;
@@ -190,6 +192,8 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     onError: error => errors.push(error),
     onStatus: status => statuses.push(status),
     onAudioStatus: status => audioStatuses.push(status),
+    onCalibration: status => calibrations.push(status),
+    onInputStatus: status => inputStatuses.push(status),
   });
   // Drain chained async API callbacks between each virtual timer.
   const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
@@ -208,7 +212,7 @@ function environment({ muted = false, enabled = true, audioLevel = 0.25, videoRe
     await settle();
   };
   return {
-    monitor, levels, posts, errors, statuses, frames, sockets, encodes, canvases, peers, localStreams, transports, remoteStreams, stream, advance, settle, audioStatuses, playbacks, worklets, mediaConstraints,
+    monitor, levels, posts, errors, statuses, frames, sockets, encodes, canvases, peers, localStreams, transports, remoteStreams, stream, advance, settle, audioStatuses, playbacks, worklets, mediaConstraints, calibrations, inputStatuses,
     mediaRequests: () => mediaRequests,
     openSocket(role) {
       assert.ok(sockets.length > 0, 'monitor must connect to the WebSocket endpoint');
@@ -295,6 +299,105 @@ await test('raising sensitivity detects quiet input live and preserves the measu
   const events = env.posts.filter(post => post.path === '/events');
   assert.ok(events.length > 0, 'quiet input must create an event without restarting capture');
   assert.ok(Math.abs(events[0].body.level - 0.002) < 0.000001, 'sensitivity must not amplify stored levels');
+});
+
+await test('calibration samples background without events or stream restart and only proposes a threshold', { audioLevel: 0.001 }, async env => {
+  await env.monitor.startHost({ settings: { threshold: 0.0005 } });
+  await env.settle();
+  env.openSocket('host');
+  assert.equal(typeof env.monitor.startCalibration, 'function', 'monitor must support explicit calibration');
+  assert.equal(env.monitor.startCalibration(), true);
+  assert.equal(env.monitor.startCalibration(), false, 'a second click must not restart the running measurement');
+  await env.advance(4950);
+  assert.equal(env.calibrations[env.calibrations.length - 1].kind, 'calibrating');
+  assert.equal(env.posts.filter(post => post.path === '/events').length, 0);
+  await env.advance(50);
+  const result = env.calibrations[env.calibrations.length - 1];
+  assert.equal(result.kind, 'complete');
+  assert.ok(Math.abs(result.threshold - 0.002) < 0.000001);
+  assert.equal(env.mediaRequests(), 1, 'calibration must reuse capture');
+  assert.ok(env.stream.getTracks().every(track => track.readyState === 'live'));
+  await env.advance(1100);
+  assert.ok(env.posts.some(post => post.path === '/events'), 'old threshold still applies until explicitly saved');
+  env.monitor.updateSettings({ threshold: result.threshold });
+  await env.advance(1000);
+  const count = env.posts.filter(post => post.path === '/events').length;
+  await env.advance(1100);
+  assert.equal(env.posts.filter(post => post.path === '/events').length, count, 'saved threshold must exclude the measured background');
+  env.setAudioLevel(0.004);
+  await env.advance(1100);
+  assert.ok(env.posts.filter(post => post.path === '/events').length > count, 'sound above calibrated threshold still triggers');
+});
+
+await test('cancelled calibration preserves queued events and the next photo deadline', { audioLevel: 0.001, videoReady: true }, async env => {
+  await env.monitor.startHost({ settings: { threshold: 0.0005, snapshotIntervalMs: 10000 } });
+  await env.settle();
+  await env.advance(200); // A real event is captured before the measurement starts.
+  assert.equal(typeof env.monitor.startCalibration, 'function');
+  assert.equal(env.monitor.startCalibration(), true);
+  env.openSocket('host');
+  await env.advance(4800);
+  const uploads = () => env.posts.filter(post => post.path === '/events');
+  assert.equal(uploads().length, 1, 'preexisting event is delivered while calibration suppresses new events');
+  assert.equal(uploads()[0].body.photoAt, '2026-01-01T00:00:00.150Z');
+  env.monitor.cancelCalibration();
+  assert.equal(env.calibrations[env.calibrations.length - 1].kind, 'cancelled');
+  await env.advance(5000);
+  assert.equal(uploads().filter(post => post.body.photo).length, 1, 'calibration must not reset the photo cooldown');
+  await env.advance(600);
+  assert.equal(uploads().filter(post => post.body.photo).length, 2);
+  const nextPhotoAt = Date.parse(uploads().filter(post => post.body.photo)[1].body.photoAt);
+  assert.ok(nextPhotoAt >= Date.parse('2026-01-01T00:00:10.150Z'));
+  assert.ok(nextPhotoAt < Date.parse('2026-01-01T00:00:11.150Z'), 'next sample/update window must capture the due photo');
+});
+
+for (const interruption of ['mute', 'suspend', 'hide', 'stop']) {
+  await test(`calibration interruption (${interruption}) cannot complete with stale or unavailable input`, { audioLevel: 0.001 }, async env => {
+    assert.equal(typeof env.monitor.startCalibration, 'function');
+    assert.equal(env.monitor.startCalibration(), false, 'stopped capture cannot calibrate');
+    await env.monitor.startHost();
+    assert.equal(env.monitor.startCalibration(), true);
+    await env.advance(1000);
+    if (interruption === 'mute') env.setMuted(true);
+    if (interruption === 'suspend') env.setAudioState('suspended');
+    if (interruption === 'hide') { document.visibilityState = 'hidden'; document.dispatchEvent({ type: 'visibilitychange' }); }
+    if (interruption === 'stop') await env.monitor.stopHost();
+    await env.advance(5000);
+    assert.ok(['cancelled', 'error'].includes(env.calibrations[env.calibrations.length - 1].kind));
+    assert.equal(env.calibrations.filter(result => result.kind === 'complete').length, 0);
+    if (interruption === 'mute') env.setMuted(false);
+    if (interruption === 'suspend') env.setAudioState('running');
+    if (interruption === 'hide') document.visibilityState = 'visible';
+    if (interruption === 'stop') {
+      // This fixture returns the same synthetic stream on every getUserMedia call.
+      // Model newly opened physical tracks before restarting the real monitor.
+      for (const track of env.stream.getTracks()) track.readyState = 'live';
+      await env.monitor.startHost();
+    }
+    assert.equal(env.monitor.startCalibration(), true, 'a fresh measurement is possible after recovery');
+    await env.advance(5000);
+    assert.equal(env.calibrations[env.calibrations.length - 1].kind, 'complete');
+  });
+}
+
+await test('local input availability recovers offline so calibration does not depend on a server heartbeat', { audioLevel: 0.001 }, async env => {
+  env.onHeartbeat(() => Promise.reject(new Error('test server offline')));
+  await env.monitor.startHost();
+  await env.settle();
+  assert.ok(env.inputStatuses.some(state => state.available), 'working local input must be available without a heartbeat');
+  env.setMuted(true);
+  await env.advance(100);
+  assert.equal(env.inputStatuses[env.inputStatuses.length - 1].available, false);
+  env.setMuted(false);
+  await env.advance(100);
+  assert.equal(env.inputStatuses[env.inputStatuses.length - 1].available, true, 'unmute must enable local calibration while server is still offline');
+  assert.equal(env.monitor.startCalibration(), true);
+  await env.advance(5000);
+  assert.equal(env.calibrations[env.calibrations.length - 1].kind, 'complete');
+  await env.monitor.stopHost();
+  assert.equal(env.inputStatuses[env.inputStatuses.length - 1].available, false);
+  assert.ok(env.errors.length > 0 && env.errors.every(error => error.message === 'test server offline'));
+  env.errors.length = 0;
 });
 
 await test('a live muted microphone reports monitoring=false and recovers on unmute', { muted: true }, async env => {

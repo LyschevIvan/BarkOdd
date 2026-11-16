@@ -1,5 +1,6 @@
 import { createMonitor } from './media.js';
 import { DEFAULT_NOISE_THRESHOLD } from './noise.js';
+import { thresholdToSlider, sliderToThreshold, levelPosition, formatLevel } from './calibration.js';
 
 const APP_BASE = new URL('./', import.meta.url);
 
@@ -47,7 +48,12 @@ let confirmingHistory = false;
 let clearingHistory = false;
 let settingsLoaded = false;
 let settingsDirty = false;
-let sensitivityDirty = false;
+let thresholdDraft = DEFAULT_NOISE_THRESHOLD;
+let appliedThreshold = DEFAULT_NOISE_THRESHOLD;
+let soundLevel = 0;
+let microphoneReady = false;
+let calibrationState = { kind: 'idle' };
+let settingsSaving = false;
 let latestPhoto = null;
 let photoEpoch = 0;
 let dialogPhotoKey = null;
@@ -480,7 +486,14 @@ async function releaseRoom() {
   clearingHistory = false;
   settingsLoaded = false;
   settingsDirty = false;
-  sensitivityDirty = false;
+  thresholdDraft = DEFAULT_NOISE_THRESHOLD;
+  appliedThreshold = DEFAULT_NOISE_THRESHOLD;
+  soundLevel = 0;
+  microphoneReady = false;
+  calibrationState = { kind: 'idle' };
+  settingsSaving = false;
+  $('calibration-feedback').textContent = '';
+  $('settings-feedback').textContent = '';
   latestPhoto = null;
   try { if (previous) await previous.destroy(); } catch (_) { /* Teardown remains local when the server is unavailable. */ }
 }
@@ -602,15 +615,34 @@ async function openRoom(role, binding, actor = authActor(), viewing = null) {
     },
     onLevel(value) {
       if (generation !== current) return;
-      const level = Math.max(0, Math.min(1, value));
-      $('sound-level-bar').style.width = `${Math.min(100, Math.sqrt(level) * 100)}%`;
-      $('sound-level-value').textContent = hostRunning ? level > 0 && level < 0.01 ? '<1%' : `${Math.round(level * 100)}%` : '—';
+      soundLevel = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
+      renderSoundLevel();
+    },
+    onInputStatus(status) {
+      if (generation !== current) return;
+      microphoneReady = status.available;
+      renderSoundControls();
+    },
+    onCalibration(result) {
+      if (generation !== current) return;
+      calibrationState = result;
+      if (result.kind === 'complete') {
+        changeThreshold(result.threshold);
+        $('calibration-feedback').textContent = `Фон измерен: ${formatLevel(result.noiseFloor)}. Предлагаемый порог: ${formatLevel(result.threshold)}. При необходимости подправьте его и сохраните настройки.`;
+      } else if (result.kind === 'calibrating') {
+        const message = `Измеряем фон… Осталось ${Math.ceil(result.remainingMs / 1000)} с. Новые шумовые события пока не создаются.`;
+        if ($('calibration-feedback').textContent !== message) $('calibration-feedback').textContent = message;
+      } else {
+        $('calibration-feedback').textContent = result.message || 'Калибровка отменена. Порог не изменён.';
+      }
+      renderSoundControls();
     },
     onLocalStream(stream) {
       if (generation !== current || role !== 'host') return;
       $('camera-video').srcObject = stream;
       $('camera-video').muted = true;
       hostRunning = !!stream;
+      if (!stream) microphoneReady = false;
       renderMedia();
       if (stream) { $('camera-video').play().catch(() => {}); loadDevices(); }
     },
@@ -684,7 +716,12 @@ async function pollRoom(current) {
     document.title = `${room.name} · BarkOdd`;
     if (wasOffline) showError('');
     if (active.role === 'host' && !settingsLoaded) { fillSettings(room.settings || DEFAULT_SETTINGS); settingsLoaded = true; }
-    if (active.role === 'host' && !settingsDirty) monitor.updateSettings(room.settings || DEFAULT_SETTINGS);
+    if (active.role === 'host' && !settingsDirty && !settingsSaving) {
+      const settings = room.settings || DEFAULT_SETTINGS;
+      monitor.updateSettings(settings);
+      appliedThreshold = settings.threshold;
+      fillSettings(settings);
+    }
     renderTimes();
     renderStatus();
     renderHistory();
@@ -800,6 +837,8 @@ function renderMedia() {
   $('audio-retry').disabled = mediaBusy;
   $('video-device').disabled = isHost && (hostRunning || mediaBusy);
   $('audio-device').disabled = isHost && (hostRunning || mediaBusy);
+  renderSoundControls();
+  renderSoundLevel();
   const microphoneLabel = isHost && video.srcObject?.getAudioTracks()[0]?.label;
   $('device-hint').textContent = hostRunning ? `${microphoneLabel ? `Микрофон: ${microphoneLabel}. ` : ''}Чтобы сменить камеру или микрофон, остановите наблюдение.` : 'Названия устройств появятся после разрешения доступа.';
   if (isHost) {
@@ -826,16 +865,62 @@ function renderMedia() {
 
 function fillSettings(settings) {
   const threshold = settings.threshold > 0 ? settings.threshold : DEFAULT_NOISE_THRESHOLD;
-  const options = [...$('sensitivity').options];
-  // Legacy slider values use the nearest preset on the same logarithmic scale.
-  const distance = option => Math.abs(Math.log(Number(option.value) / threshold));
-  $('sensitivity').value = options.reduce((nearest, option) => distance(option) < distance(nearest) ? option : nearest).value;
-  sensitivityDirty = false;
+  thresholdDraft = threshold;
+  renderThreshold();
   const select = $('snapshot-interval');
   if (![...select.options].some((option) => Number(option.value) === settings.snapshotIntervalMs)) {
     select.add(new Option(`${settings.snapshotIntervalMs / 1000} секунд`, String(settings.snapshotIntervalMs)));
   }
   select.value = String(settings.snapshotIntervalMs);
+}
+
+function renderThreshold() {
+  const select = $('sensitivity');
+  const preset = [...select.options].find(option => Number(option.value) === thresholdDraft);
+  let custom = select.querySelector('option[value="custom"]');
+  if (!preset && !custom) {
+    custom = new Option('Свой порог', 'custom');
+    custom.disabled = true;
+    select.add(custom);
+  }
+  if (preset && custom) custom.remove();
+  select.value = preset ? preset.value : 'custom';
+  $('threshold-adjustment').value = thresholdToSlider(thresholdDraft);
+  $('threshold-adjustment').setAttribute('aria-valuetext', `Порог ${formatLevel(thresholdDraft)}`);
+  $('threshold-value').textContent = formatLevel(thresholdDraft);
+  renderSoundLevel();
+}
+
+function changeThreshold(threshold) {
+  thresholdDraft = threshold;
+  settingsDirty = true;
+  $('settings-feedback').textContent = 'Есть несохранённые изменения';
+  renderThreshold();
+}
+
+function renderSoundLevel() {
+  const draft = thresholdDraft !== appliedThreshold;
+  $('sound-level-bar').style.width = `${levelPosition(soundLevel)}%`;
+  $('sound-level-value').textContent = hostRunning ? formatLevel(soundLevel) : '—';
+  $('sound-threshold-marker').style.left = `${levelPosition(appliedThreshold)}%`;
+  $('sound-threshold-marker').title = `Действующий порог: ${formatLevel(appliedThreshold)}`;
+  $('sound-draft-marker').hidden = !draft;
+  $('sound-draft-marker').style.left = `${levelPosition(thresholdDraft)}%`;
+  $('sound-draft-marker').title = `Несохранённый порог: ${formatLevel(thresholdDraft)}`;
+  $('level-container').classList.toggle('above-threshold', hostRunning && soundLevel >= appliedThreshold);
+  $('level-container').querySelector('.level-track').setAttribute('aria-label', `Уровень звука: ${hostRunning ? formatLevel(soundLevel) : 'микрофон выключен'}. Действующий порог: ${formatLevel(appliedThreshold)}.${draft ? ` Несохранённый порог: ${formatLevel(thresholdDraft)}.` : ''}`);
+  $('threshold-hint').textContent = draft
+    ? `Сплошная отметка — действующий порог ${formatLevel(appliedThreshold)}, пунктирная — новый ${formatLevel(thresholdDraft)}. Сохраните настройки, чтобы применить.`
+    : `Отметка — действующий порог ${formatLevel(appliedThreshold)}. Звук выше него вызывает срабатывание.`;
+}
+
+function renderSoundControls() {
+  const calibrating = calibrationState.kind === 'calibrating';
+  $('calibrate-noise').disabled = !hostRunning || !microphoneReady || mediaBusy || settingsSaving || calibrating;
+  $('cancel-calibration').hidden = !calibrating;
+  $('calibration-progress').hidden = !calibrating;
+  $('calibration-progress').value = calibrating ? calibrationState.progress : 0;
+  for (const id of ['save-settings', 'sensitivity', 'threshold-adjustment', 'snapshot-interval']) $(id).disabled = settingsSaving || calibrating;
 }
 
 async function loadDevices() {
@@ -1030,6 +1115,7 @@ async function toggleCapture() {
       else {
         if (!window.isSecureContext) throw new Error('Камера доступна только по HTTPS или на localhost. Откройте BarkOdd по защищённому адресу.');
         const videoFacingMode = $('video-device').selectedOptions[0]?.dataset.facingMode;
+        appliedThreshold = room?.settings?.threshold ?? DEFAULT_NOISE_THRESHOLD;
         await currentMonitor.startHost({
           videoDeviceId: videoFacingMode ? undefined : $('video-device').value || undefined,
           videoFacingMode,
@@ -1177,17 +1263,29 @@ $('capture-button').addEventListener('click', () => void toggleCapture());
 $('clear-history').addEventListener('click', () => void clearHistory());
 $('audio-button').addEventListener('click', () => void setViewerChannels(viewerWatching, !viewerListening));
 $('audio-retry').addEventListener('click', () => { void monitor?.resumeAudio().catch(error => showError(error.message)); });
-$('sensitivity').addEventListener('change', () => { settingsDirty = true; sensitivityDirty = true; $('settings-feedback').textContent = 'Есть несохранённые изменения'; });
+$('sensitivity').addEventListener('change', () => {
+  const value = Number($('sensitivity').value);
+  if (Number.isFinite(value)) changeThreshold(value);
+});
+$('threshold-adjustment').addEventListener('input', () => changeThreshold(sliderToThreshold(Number($('threshold-adjustment').value))));
+$('calibrate-noise').addEventListener('click', () => {
+  if (!settingsSaving && active?.role === 'host') monitor?.startCalibration();
+});
+$('cancel-calibration').addEventListener('click', () => monitor?.cancelCalibration());
+$('audio-device').addEventListener('change', () => {
+  monitor?.cancelCalibration();
+  $('calibration-feedback').textContent = 'Микрофон изменён. Включите наблюдение и повторите калибровку для нового микрофона.';
+});
 $('snapshot-interval').addEventListener('change', () => { settingsDirty = true; $('settings-feedback').textContent = 'Есть несохранённые изменения'; });
 $('settings-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (!api || !active || active.role !== 'host') return;
+  if (!api || !active || active.role !== 'host' || settingsSaving || calibrationState.kind === 'calibrating') return;
   const current = generation;
-  const controls = ['save-settings', 'sensitivity', 'snapshot-interval'].map($);
-  for (const control of controls) control.disabled = true;
+  settingsSaving = true;
+  renderSoundControls();
   try {
-    // Saving only the photo interval must not silently replace a legacy threshold.
-    const threshold = sensitivityDirty ? Number($('sensitivity').value) : (room?.settings?.threshold ?? DEFAULT_NOISE_THRESHOLD);
+    // Preserve the exact threshold, including calibrated and legacy values.
+    const threshold = thresholdDraft;
     const settings = await api.put('/settings', { threshold, snapshotIntervalMs: Number($('snapshot-interval').value) });
     if (current !== generation) return;
     // A room response read before this save must not restore the old camera
@@ -1195,13 +1293,14 @@ $('settings-form').addEventListener('submit', async (event) => {
     roomPollSequence += 1;
     if (room) room.settings = settings;
     monitor.updateSettings(settings);
+    appliedThreshold = settings.threshold;
     settingsDirty = false;
     fillSettings(settings);
     $('settings-feedback').textContent = 'Настройки сохранены';
     toast('Настройки наблюдения сохранены');
     void pollRoom(current);
   } catch (error) { if (current === generation) showError(error.message); }
-  finally { for (const control of controls) control.disabled = false; }
+  finally { if (current === generation) { settingsSaving = false; renderSoundControls(); } }
 });
 $('copy-link').addEventListener('click', () => void copyLink());
 $('regenerate-key').addEventListener('click', async () => {

@@ -1,4 +1,5 @@
 import { NoiseDetector } from './noise.js';
+import { NoiseCalibration, CALIBRATION_DURATION_MS } from './calibration.js';
 import { createRTC } from './rtc.js';
 import { createAudioCapture, createAudioPlayer, AUDIO_PACKET_BYTES } from './audio.js';
 
@@ -9,7 +10,7 @@ const cancelled = () => Object.assign(new Error('Наблюдение остан
 const MAX_FRAME_BYTES = 200 * 1024;
 const TURN_REFRESH_MS = 45 * 60 * 1000;
 
-export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLevel = noop, onLocalStream = noop, onFrame = noop, onTransport = noop, onRemoteStream = noop, onError = noop }) {
+export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLevel = noop, onInputStatus = noop, onCalibration = noop, onLocalStream = noop, onFrame = noop, onTransport = noop, onRemoteStream = noop, onError = noop }) {
   let host = null;
   let viewer = null;
   let destroyed = false;
@@ -439,13 +440,47 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     return null;
   }
 
+  function finishCalibration(state, result) {
+    if (!state?.calibration) return;
+    state.calibration = null;
+    // Break the unfinished noise candidate, preserving episode/photo deadlines.
+    state.detector.process(0, now());
+    emit(onCalibration, result);
+  }
+
+  function inputStatus(state, message = '') {
+    if (state.inputMessage === message) return;
+    state.inputMessage = message;
+    emit(onInputStatus, { available: !message, message });
+  }
+
+  function startCalibration() {
+    const state = host;
+    if (!state?.active || !state.stream || state.calibration) return false;
+    const issue = audioInputIssue(state);
+    if (issue || document.visibilityState !== 'visible') {
+      emit(onCalibration, { kind: 'error', message: issue || 'Откройте вкладку устройства питомца для калибровки.' });
+      return false;
+    }
+    state.calibration = new NoiseCalibration(now());
+    state.detector.process(0, now());
+    emit(onCalibration, { kind: 'calibrating', remainingMs: CALIBRATION_DURATION_MS, progress: 0 });
+    return true;
+  }
+
+  function cancelCalibration() {
+    finishCalibration(host, { kind: 'cancelled', message: 'Калибровка отменена. Порог не изменён.' });
+  }
+
   function sample(state) {
     if (!state.active) return;
     try {
       state.rtc?.setPublishing(healthySource(state));
       syncAudioCapture(state);
       const inputIssue = audioInputIssue(state);
+      inputStatus(state, inputIssue || '');
       if (inputIssue) {
+        finishCalibration(state, { kind: 'error', message: `Калибровка прервана. ${inputIssue}` });
         // Suspended audio or an unavailable input can leave a retained waveform.
         // It must never become a new noise event or a nonzero microphone level.
         state.detector.process(0, now());
@@ -458,6 +493,16 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
       for (const value of state.samples) squares += value * value;
       const level = Math.min(1, Math.sqrt(squares / state.samples.length));
       emit(onLevel, level);
+      if (state.calibration) {
+        if (document.visibilityState !== 'visible') {
+          finishCalibration(state, { kind: 'cancelled', message: 'Калибровка отменена: вкладка скрыта. Вернитесь и повторите замер.' });
+        } else {
+          const result = state.calibration.add(level, now());
+          if (result.kind === 'calibrating') emit(onCalibration, result);
+          else finishCalibration(state, result);
+        }
+        return;
+      }
       const event = state.detector.process(level, now());
       if (event) {
         const entry = state.events.get(event.episodeId) || { capture: null };
@@ -477,7 +522,11 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
         state.events.set(event.episodeId, entry);
         if (state.events.size > 12) state.events.delete(state.events.keys().next().value);
       }
-    } catch (error) { report(error); }
+    } catch (error) {
+      inputStatus(state, 'Не удалось получить уровень микрофона.');
+      finishCalibration(state, { kind: 'error', message: 'Не удалось измерить фон. Проверьте микрофон и повторите калибровку.' });
+      report(error);
+    }
     finally { later(state, 50, () => sample(state)); }
   }
 
@@ -599,6 +648,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
         };
       }
       state.visibility = () => {
+        if (document.visibilityState !== 'visible') finishCalibration(state, { kind: 'cancelled', message: 'Калибровка отменена: вкладка скрыта. Вернитесь и повторите замер.' });
         if (document.visibilityState !== 'visible' || !state.active) return;
         void acquireWakeLock(state);
         void state.audio.resume().catch(report);
@@ -625,6 +675,8 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
   async function stopHost() {
     const state = host;
     if (!state) return;
+    cancelCalibration();
+    inputStatus(state, 'Микрофон выключен.');
     host = null;
     stopSession(state);
     state.capture?.close();
@@ -712,5 +764,5 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     if (host?.active) applyHistoryVersion(host, version);
   }
 
-  return { startHost, stopHost, startViewer, stopViewer, resumeAudio, updateSettings, updateHistoryVersion, destroy };
+  return { startHost, stopHost, startViewer, stopViewer, resumeAudio, updateSettings, updateHistoryVersion, startCalibration, cancelCalibration, destroy };
 }

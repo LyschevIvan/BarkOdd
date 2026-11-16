@@ -241,7 +241,7 @@ test('saving the photo interval preserves a legacy threshold between presets', a
   expect(legacy.ok()).toBe(true);
   await page.reload();
   await expect(page.locator('#dashboard')).toBeVisible();
-  await expect(page.locator('#sensitivity')).toHaveValue('0.1');
+  await expect(page.locator('#sensitivity')).toHaveValue('custom');
   expect((await state()).settings.threshold).toBe(0.06);
 
   await page.locator('#snapshot-interval').selectOption('60000');
@@ -249,7 +249,7 @@ test('saving the photo interval preserves a legacy threshold between presets', a
   await expect.poll(async () => (await state()).settings).toMatchObject({ threshold: 0.06, snapshotIntervalMs: 60000 });
   await page.reload();
   await expect(page.locator('#dashboard')).toBeVisible();
-  await expect(page.locator('#sensitivity')).toHaveValue('0.1');
+  await expect(page.locator('#sensitivity')).toHaveValue('custom');
   await expect(page.locator('#snapshot-interval')).toHaveValue('60000');
   expect((await state()).settings.threshold).toBe(0.06);
 });

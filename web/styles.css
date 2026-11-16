@@ -72,3 +72,29 @@
 .confirm-dialog h2 { font-size: 23px; }
 .confirm-dialog p { margin: 14px 0 22px; font-size: 14px; line-height: 1.7; }
 .confirm-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+
+/* Sound calibration keeps quiet signals and their thresholds on the same scale. */
+.calibration-controls { display: grid; gap: 10px; margin-top: 18px; }
+.calibration-controls .field-hint:empty { display: none; }
+.calibration-controls .text-button { justify-self: center; padding: 5px 10px; }
+.calibration-controls progress { width: 100%; height: 6px; accent-color: var(--pine); }
+.threshold-field { margin-top: 24px; }
+.threshold-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.threshold-heading output { font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 600; color: var(--pine); }
+#threshold-adjustment { display: block; width: 100%; min-height: 30px; margin: 0; padding: 0; accent-color: #637f50; cursor: pointer; }
+#threshold-adjustment:disabled { cursor: default; opacity: .55; }
+.threshold-ends { display: flex; justify-content: space-between; gap: 15px; font-size: 9px; line-height: 1.5; color: #68765e; }
+.threshold-ends span:last-child { text-align: right; }
+.sound-level { gap: 10px; font-size: 10px; flex-wrap: wrap; }
+.sound-level > span:last-child { min-width: 48px; font-variant-numeric: tabular-nums; }
+.level-track { position: relative; height: 8px; overflow: visible; min-width: 65px; }
+#sound-level-bar { border-radius: 5px; }
+.level-track .threshold-marker { position: absolute; top: -5px; width: 0; height: 18px; border-left: 2px solid #294b37; background: none; transform: translateX(-1px); transition: none; }
+.level-track .draft-marker { top: -7px; height: 22px; border-left: 2px dashed #ad6b24; }
+.above-threshold #sound-level-bar { background: #b37a36; }
+.threshold-hint { margin-top: 12px; }
+@media (max-width: 640px) {
+  .threshold-ends { font-size: 10px; }
+  .threshold-heading output { font-size: 13px; }
+  #threshold-adjustment { min-height: 40px; }
+}
