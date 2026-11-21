@@ -1,3 +1,5 @@
+import { t } from './i18n.js';
+
 const noop = () => {};
 const clock = () => performance.now();
 const connectionID = () => globalThis.crypto?.randomUUID?.() || `rtc-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
@@ -8,7 +10,7 @@ const subscription = mode => wantsAudio(mode) ? mode : 'video';
 // Signaling remains on the authenticated control socket. Closing this helper
 // invalidates every in-flight browser promise as well as the live connections.
 export function createRTC({ role, clientId, iceServers = [], stream, mode = 'video', send, onStream = noop, onStatus = noop, onAudioStream = noop, onAudioStatus = noop, onError = noop }) {
-  if (!globalThis.RTCPeerConnection) throw new Error('Этот браузер не поддерживает WebRTC.');
+  if (!globalThis.RTCPeerConnection) throw new Error(t('Этот браузер не поддерживает WebRTC.'));
   let active = true, publishing = true, monitoring = false, sourceId = '', lease = null, visible = null, audible = null;
   let authorized = new Set(), modes = new Map();
   const peers = new Map(), retries = new Map(), delays = new Map(), timers = new Set(), retired = new Set();
@@ -36,7 +38,7 @@ export function createRTC({ role, clientId, iceServers = [], stream, mode = 'vid
     peer.audioTracks.clear();
     if (role === 'viewer') {
       display(null); sound(null);
-      if (active && wantsAudio(peer.mode)) onAudioStatus('connecting', 'Ожидаем звук с устройства питомца…');
+      if (active && wantsAudio(peer.mode)) onAudioStatus('connecting', t('Ожидаем звук с устройства питомца…'));
       retired.add(`${peer.id}\0${peer.connectionId}`);
       if (retired.size > 128) retired.delete(retired.values().next().value);
     }
@@ -107,7 +109,7 @@ export function createRTC({ role, clientId, iceServers = [], stream, mode = 'vid
     if (progress) {
       peer.lastAudioPacket = clock();
       sound(peer.audioStream);
-      audioStatus(peer, 'live', 'Прямой звук');
+      audioStatus(peer, 'live', t('Прямой звук'));
     }
   }
   function watchAudio(peer) {
@@ -115,7 +117,7 @@ export function createRTC({ role, clientId, iceServers = [], stream, mode = 'vid
     const elapsed = clock() - (peer.lastAudioPacket ?? peer.started);
     if (elapsed >= 3000 && !audioHealthy(peer)) {
       sound(null);
-      audioStatus(peer, 'connecting', 'Нет новых аудиопакетов. Ожидаем устройство питомца…');
+      audioStatus(peer, 'connecting', t('Нет новых аудиопакетов. Ожидаем устройство питомца…'));
     }
     if (elapsed >= (peer.lastAudioPacket == null ? 10000 : 6000) && !videoHealthy(peer)) { fail(peer); return; }
     // Keep the deadline independent of browser promises, with at most one
@@ -139,7 +141,7 @@ export function createRTC({ role, clientId, iceServers = [], stream, mode = 'vid
       if (!peer.audioTracks.size) {
         peer.lastAudioPacket = null;
         sound(null);
-        audioStatus(peer, 'connecting', 'Звуковая дорожка завершена. Ожидаем устройство питомца…');
+        audioStatus(peer, 'connecting', t('Звуковая дорожка завершена. Ожидаем устройство питомца…'));
       }
     };
     peer.audioTracks.set(track, { receiver: event.receiver, packets: new Map(), ended });
@@ -151,11 +153,11 @@ export function createRTC({ role, clientId, iceServers = [], stream, mode = 'vid
     peer.lastFrame = clock();
     cancel(peer.frameTimer); cancel(peer.recoveryTimer);
     display(peer.remoteStream);
-    onStatus('live', 'Прямая трансляция');
+    onStatus('live', t('Прямая трансляция'));
     peer.frameTimer = later(3000, () => {
       if (!current(peer)) return;
       display(null);
-      onStatus('connecting', 'Нет новых кадров. Ожидаем устройство питомца…');
+      onStatus('connecting', t('Нет новых кадров. Ожидаем устройство питомца…'));
       // A receiver which remains frozen is closed so the sender's connection
       // state initiates a new offer; a resumed decoder cancels this recovery.
       peer.recoveryTimer = later(3000, () => recoverVideo(peer));
@@ -217,7 +219,7 @@ export function createRTC({ role, clientId, iceServers = [], stream, mode = 'vid
       } else if (event.track.kind === 'audio' && wantsAudio(peer.mode)) observeAudio(peer, event);
     };
     if (role === 'viewer' && wantsAudio(peer.mode)) {
-      audioStatus(peer, 'connecting', 'Ожидаем звук с устройства питомца…');
+      audioStatus(peer, 'connecting', t('Ожидаем звук с устройства питомца…'));
       peer.audioTimer = later(500, () => watchAudio(peer));
     }
     return peer;
@@ -287,8 +289,8 @@ export function createRTC({ role, clientId, iceServers = [], stream, mode = 'vid
     cancel(lease);
     lease = later(6000, () => {
       monitoring = false; clear();
-      onStatus('offline', 'Нет связи с сервером. Ожидаем подтверждение трансляции…');
-      if (role === 'viewer' && wantsAudio(mode)) onAudioStatus('offline', 'Нет связи с сервером. Ожидаем подтверждение звука…');
+      onStatus('offline', t('Нет связи с сервером. Ожидаем подтверждение трансляции…'));
+      if (role === 'viewer' && wantsAudio(mode)) onAudioStatus('offline', t('Нет связи с сервером. Ожидаем подтверждение звука…'));
     });
     for (const peer of [...peers.values()]) if (!allowed(peer.id) || (role === 'host' && peer.mode !== modes.get(peer.id))) remove(peer);
     for (const [id, timer] of retries) if (!allowed(id)) { cancel(timer); retries.delete(id); }

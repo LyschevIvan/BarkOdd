@@ -1,3 +1,5 @@
+import { t } from './i18n.js';
+
 import { NoiseDetector } from './noise.js';
 import { NoiseCalibration, CALIBRATION_DURATION_MS } from './calibration.js';
 import { createRTC } from './rtc.js';
@@ -6,7 +8,7 @@ import { createAudioCapture, createAudioPlayer, AUDIO_PACKET_BYTES } from './aud
 const noop = () => {};
 const now = () => performance.now();
 const uuid = () => globalThis.crypto?.randomUUID?.() || `client-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
-const cancelled = () => Object.assign(new Error('Наблюдение остановлено'), { cancelled: true });
+const cancelled = () => Object.assign(new Error(t('Наблюдение остановлено')), { cancelled: true });
 const MAX_FRAME_BYTES = 200 * 1024;
 const TURN_REFRESH_MS = 45 * 60 * 1000;
 
@@ -32,7 +34,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     cancelTimer(state, state.audioTimer);
     state.audioReceived = false;
     state.player?.reset();
-    audioStatus(state, 'connecting', 'Ожидаем звук с устройства питомца…');
+    audioStatus(state, 'connecting', t('Ожидаем звук с устройства питомца…'));
   }
 
   function emit(callback, value) {
@@ -94,7 +96,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
         error ? reject(error) : resolve(value);
       };
       const abort = () => finish(cancelled());
-      const timer = setTimeout(() => finish(new Error('Сервер не отвечает. Повторяем подключение.')), 12000);
+      const timer = setTimeout(() => finish(new Error(t('Сервер не отвечает. Повторяем подключение.'))), 12000);
       state.requests.add(abort);
       Promise.resolve().then(() => {
         if (!state.active) throw cancelled();
@@ -153,7 +155,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     closeSocket(state);
     if (state.role === 'viewer') clearFrame(state);
     else void stopHost();
-    const error = new Error(message || 'Доступ к трансляции закрыт. Откройте новую ссылку с устройства питомца.');
+    const error = new Error(t(message || 'Доступ к трансляции закрыт. Откройте новую ссылку с устройства питомца.'));
     error.status = code;
     error.sessionEnded = state.role === 'host' && (code === 403 || code === 409);
     status('error', error.message);
@@ -163,7 +165,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
   function hostRequestFailed(state, error) {
     if ([401, 403, 404, 409].includes(error.status)) { accessDenied(state, error.message, error.status); return; }
     report(error);
-    status('offline', 'Нет связи с сервером. Камера и обнаружение звука продолжают работать.');
+    status('offline', t('Нет связи с сервером. Камера и обнаружение звука продолжают работать.'));
   }
 
   function applyHistoryVersion(state, version, initialHeartbeat = false) {
@@ -194,7 +196,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     // establish a replacement session. Authenticate only after a healthy
     // heartbeat; an already connected socket may remain during a pause.
     if (monitoring && healthySource(state)) connectSocket(state);
-    if (state.ready && !state.transportError && monitoring && healthySource(state)) status('monitoring', 'Наблюдение работает. Оставьте эту вкладку открытой.');
+    if (state.ready && !state.transportError && monitoring && healthySource(state)) status('monitoring', t('Наблюдение работает. Оставьте эту вкладку открытой.'));
   }
 
   function retrySocket(state) {
@@ -229,7 +231,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
       closeSocket(state);
       if (state.role === 'viewer') clearFrame(state);
       if (code === 1008) { accessDenied(state); return; }
-      status('offline', 'Нет связи с сервером. Повторяем подключение.');
+      status('offline', t('Нет связи с сервером. Повторяем подключение.'));
       retrySocket(state);
     };
     state.connectTimer = later(state, 6000, () => lost());
@@ -261,8 +263,8 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
       if (state.role === 'viewer') {
         if (!state.sourceOnline || !state.sourceMonitoring) {
           clearFrame(state);
-          status('offline', state.sourceOnline ? 'Наблюдение на устройстве питомца остановлено' : 'Устройство питомца не в сети');
-        } else if (!currentFrame && !state.remoteStream) status('connecting', wantsVideo(state) ? 'Ожидаем кадры с устройства питомца…' : 'Ожидаем звук с устройства питомца…');
+          status('offline', state.sourceOnline ? t('Наблюдение на устройстве питомца остановлено') : t('Устройство питомца не в сети'));
+        } else if (!currentFrame && !state.remoteStream) status('connecting', wantsVideo(state) ? t('Ожидаем кадры с устройства питомца…') : t('Ожидаем звук с устройства питомца…'));
       }
     }
     socket.onmessage = event => {
@@ -276,7 +278,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
             if (!wantsAudio(state) || data.byteLength !== AUDIO_PACKET_BYTES || !state.player?.enqueue(data)) return;
             state.audioReceived = true;
             cancelTimer(state, state.audioTimer);
-            audioStatus(state, 'live', 'Слушаем звук дома');
+            audioStatus(state, 'live', t('Слушаем звук дома'));
             state.audioTimer = later(state, 3000, () => clearAudio(state));
             return;
           }
@@ -286,10 +288,10 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
         cancelTimer(state, state.frameTimer);
         // WebSocket binary blobs have no MIME type. Set it before the UI decodes.
         frame(data.type === 'image/jpeg' ? data : new Blob([data], { type: 'image/jpeg' }));
-        status('live', 'Прямая трансляция');
+        status('live', t('Прямая трансляция'));
         state.frameTimer = later(state, 3000, () => {
           frame(null);
-          status('connecting', 'Нет новых кадров. Ожидаем устройство питомца…');
+          status('connecting', t('Нет новых кадров. Ожидаем устройство питомца…'));
         });
         return;
       }
@@ -339,7 +341,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
             if (hasTURN) state.iceRefreshTimer = later(state, TURN_REFRESH_MS, () => lost(1012));
           } catch (error) { state.transportError = true; report(error); status('error', error.message); }
         }
-        if (state.role === 'host' && !state.transportError && healthySource(state)) status('monitoring', 'Наблюдение работает. Оставьте эту вкладку открытой.');
+        if (state.role === 'host' && !state.transportError && healthySource(state)) status('monitoring', t('Наблюдение работает. Оставьте эту вкладку открытой.'));
         if (state.pendingControl) applyControl(state.pendingControl);
       } else if ((state.role === 'host' && message.type === 'viewers') || (state.role === 'viewer' && message.type === 'source')) {
         // Some server states precede ready. Apply them before accepting offers so
@@ -432,12 +434,12 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
   }
 
   function audioInputIssue(state) {
-    if (state.audio.state !== 'running') return 'Браузер приостановил обработку звука. Вернитесь к вкладке устройства питомца. Если звук не восстановится, остановите и снова включите наблюдение.';
+    if (state.audio.state !== 'running') return t('Браузер приостановил обработку звука. Вернитесь к вкладке устройства питомца. Если звук не восстановится, остановите и снова включите наблюдение.');
     const tracks = state.stream.getAudioTracks().filter(track => track.readyState === 'live');
-    if (!tracks.length) return 'Микрофон недоступен. Проверьте подключение и запустите наблюдение снова.';
+    if (!tracks.length) return t('Микрофон недоступен. Проверьте подключение и запустите наблюдение снова.');
     const enabled = tracks.filter(track => track.enabled);
-    if (!enabled.length) return 'Микрофон выключен. Проверьте устройство и запустите наблюдение снова.';
-    if (enabled.every(track => track.muted)) return 'Браузер временно заглушил микрофон. Проверьте доступ к нему в браузере и системе.';
+    if (!enabled.length) return t('Микрофон выключен. Проверьте устройство и запустите наблюдение снова.');
+    if (enabled.every(track => track.muted)) return t('Браузер временно заглушил микрофон. Проверьте доступ к нему в браузере и системе.');
     return null;
   }
 
@@ -469,16 +471,16 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     state.analyser?.disconnect();
     if (state.audio) void state.audio.close().catch(noop);
     if (!current || destroyed) return;
-    inputStatus(state, 'Микрофон выключен.');
+    inputStatus(state, t('Микрофон выключен.'));
     emit(onLevel, 0);
     emit(onCalibration, result);
   }
 
   function previewInputIssue(state) {
-    if (state.audio.state !== 'running') return 'Браузер приостановил звук. Вернитесь к вкладке и повторите калибровку.';
+    if (state.audio.state !== 'running') return t('Браузер приостановил звук. Вернитесь к вкладке и повторите калибровку.');
     const tracks = state.stream.getAudioTracks();
     if (!tracks.some(track => track.readyState === 'live' && track.enabled && !track.muted)) {
-      return 'Микрофон недоступен или выключен. Проверьте его и повторите калибровку.';
+      return t('Микрофон недоступен или выключен. Проверьте его и повторите калибровку.');
     }
     return null;
   }
@@ -501,19 +503,19 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
       if (result.kind === 'calibrating') emit(onCalibration, result);
       else finishCalibrationPreview(state, result);
     } catch (_) {
-      finishCalibrationPreview(state, { kind: 'error', message: 'Не удалось измерить фон. Проверьте микрофон и повторите калибровку.' });
+      finishCalibrationPreview(state, { kind: 'error', message: t('Не удалось измерить фон. Проверьте микрофон и повторите калибровку.') });
     }
     later(state, 50, () => sampleCalibrationPreview(state));
   }
 
   function calibrationMicrophoneError(cause) {
     const explanations = {
-      NotAllowedError: 'Разрешите доступ к микрофону в настройках браузера и повторите калибровку.',
-      NotFoundError: 'Микрофон не найден. Подключите его и повторите калибровку.',
-      NotReadableError: 'Не удалось включить микрофон. Проверьте, не занят ли он другим приложением.',
-      OverconstrainedError: 'Выбранный микрофон недоступен. Выберите другой микрофон.',
+      NotAllowedError: t('Разрешите доступ к микрофону в настройках браузера и повторите калибровку.'),
+      NotFoundError: t('Микрофон не найден. Подключите его и повторите калибровку.'),
+      NotReadableError: t('Не удалось включить микрофон. Проверьте, не занят ли он другим приложением.'),
+      OverconstrainedError: t('Выбранный микрофон недоступен. Выберите другой микрофон.'),
     };
-    return { kind: 'error', message: explanations[cause?.name] || cause?.message || 'Не удалось включить микрофон. Повторите калибровку.' };
+    return { kind: 'error', message: explanations[cause?.name] || cause?.message || t('Не удалось включить микрофон. Повторите калибровку.') };
   }
 
   async function openCalibrationMicrophone(state, audioDeviceId) {
@@ -524,11 +526,11 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     };
     try {
       listen(document, 'visibilitychange', () => {
-        if (document.visibilityState !== 'visible') finishCalibrationPreview(state, { kind: 'cancelled', message: 'Калибровка отменена: вкладка скрыта. Вернитесь и повторите замер.' });
+        if (document.visibilityState !== 'visible') finishCalibrationPreview(state, { kind: 'cancelled', message: t('Калибровка отменена: вкладка скрыта. Вернитесь и повторите замер.') });
       });
-      if (!navigator.mediaDevices?.getUserMedia) throw new Error('Микрофон доступен только через HTTPS или localhost.');
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error(t('Микрофон доступен только через HTTPS или localhost.'));
       const Audio = globalThis.AudioContext || globalThis.webkitAudioContext;
-      if (!Audio) throw new Error('Этот браузер не поддерживает обработку звука.');
+      if (!Audio) throw new Error(t('Этот браузер не поддерживает обработку звука.'));
       state.audio = new Audio();
       // Start resuming within the click activation; permission and resume may
       // settle in either order. Neither consumes the five-second sample window.
@@ -544,14 +546,14 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
       state.stream = stream;
       for (const track of stream.getAudioTracks()) {
         for (const type of ['ended', 'mute']) listen(track, type, () => {
-          finishCalibrationPreview(state, { kind: 'error', message: 'Доступ к микрофону прерван. Проверьте его и повторите калибровку.' });
+          finishCalibrationPreview(state, { kind: 'error', message: t('Доступ к микрофону прерван. Проверьте его и повторите калибровку.') });
         });
       }
       if (!await resumed || !current()) return;
       const issue = previewInputIssue(state);
       if (issue) { finishCalibrationPreview(state, { kind: 'error', message: issue }); return; }
       listen(state.audio, 'statechange', () => {
-        if (state.audio.state !== 'running') finishCalibrationPreview(state, { kind: 'error', message: 'Браузер приостановил звук. Вернитесь к вкладке и повторите калибровку.' });
+        if (state.audio.state !== 'running') finishCalibrationPreview(state, { kind: 'error', message: t('Браузер приостановил звук. Вернитесь к вкладке и повторите калибровку.') });
       });
       state.source = state.audio.createMediaStreamSource(stream);
       state.analyser = state.audio.createAnalyser();
@@ -571,12 +573,12 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     if (destroyed || calibrationPreview?.active) return false;
     if (!host?.active) {
       if (document.visibilityState !== 'visible') {
-        emit(onCalibration, { kind: 'error', message: 'Откройте вкладку устройства питомца для калибровки.' });
+        emit(onCalibration, { kind: 'error', message: t('Откройте вкладку устройства питомца для калибровки.') });
         return false;
       }
       const state = { active: true, timers: new Set(), listeners: [] };
       calibrationPreview = state;
-      emit(onCalibration, { kind: 'starting', message: 'Включаем микрофон. Разрешите доступ к нему в браузере…' });
+      emit(onCalibration, { kind: 'starting', message: t('Включаем микрофон. Разрешите доступ к нему в браузере…') });
       void openCalibrationMicrophone(state, audioDeviceId);
       return true;
     }
@@ -584,7 +586,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     if (!state?.active || !state.stream || state.calibration) return false;
     const issue = audioInputIssue(state);
     if (issue || document.visibilityState !== 'visible') {
-      emit(onCalibration, { kind: 'error', message: issue || 'Откройте вкладку устройства питомца для калибровки.' });
+      emit(onCalibration, { kind: 'error', message: issue || t('Откройте вкладку устройства питомца для калибровки.') });
       return false;
     }
     state.calibration = new NoiseCalibration(now());
@@ -594,8 +596,8 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
   }
 
   function cancelCalibration() {
-    finishCalibrationPreview(calibrationPreview, { kind: 'cancelled', message: 'Калибровка отменена. Порог не изменён.' });
-    finishCalibration(host, { kind: 'cancelled', message: 'Калибровка отменена. Порог не изменён.' });
+    finishCalibrationPreview(calibrationPreview, { kind: 'cancelled', message: t('Калибровка отменена. Порог не изменён.') });
+    finishCalibration(host, { kind: 'cancelled', message: t('Калибровка отменена. Порог не изменён.') });
   }
 
   function sample(state) {
@@ -606,7 +608,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
       const inputIssue = audioInputIssue(state);
       inputStatus(state, inputIssue || '');
       if (inputIssue) {
-        finishCalibration(state, { kind: 'error', message: `Калибровка прервана. ${inputIssue}` });
+        finishCalibration(state, { kind: 'error', message: t('Калибровка прервана. {inputIssue}', { inputIssue }) });
         // Suspended audio or an unavailable input can leave a retained waveform.
         // It must never become a new noise event or a nonzero microphone level.
         state.detector.process(0, now());
@@ -621,7 +623,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
       emit(onLevel, level);
       if (state.calibration) {
         if (document.visibilityState !== 'visible') {
-          finishCalibration(state, { kind: 'cancelled', message: 'Калибровка отменена: вкладка скрыта. Вернитесь и повторите замер.' });
+          finishCalibration(state, { kind: 'cancelled', message: t('Калибровка отменена: вкладка скрыта. Вернитесь и повторите замер.') });
         } else {
           const result = state.calibration.add(level, now());
           if (result.kind === 'calibrating') emit(onCalibration, result);
@@ -649,8 +651,8 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
         if (state.events.size > 12) state.events.delete(state.events.keys().next().value);
       }
     } catch (error) {
-      inputStatus(state, 'Не удалось получить уровень микрофона.');
-      finishCalibration(state, { kind: 'error', message: 'Не удалось измерить фон. Проверьте микрофон и повторите калибровку.' });
+      inputStatus(state, t('Не удалось получить уровень микрофона.'));
+      finishCalibration(state, { kind: 'error', message: t('Не удалось измерить фон. Проверьте микрофон и повторите калибровку.') });
       report(error);
     }
     finally { later(state, 50, () => sample(state)); }
@@ -712,16 +714,16 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
 
   function mediaError(error) {
     const explanations = {
-      NotAllowedError: 'Разрешите доступ к камере и микрофону в настройках браузера.',
-      NotFoundError: 'Камера или микрофон не найдены. Подключите оба устройства.',
-      NotReadableError: 'Не удалось включить камеру или микрофон. Проверьте, не заняты ли они другим приложением.',
-      OverconstrainedError: 'Выбранное устройство недоступно. Выберите другую камеру или микрофон.',
+      NotAllowedError: t('Разрешите доступ к камере и микрофону в настройках браузера.'),
+      NotFoundError: t('Камера или микрофон не найдены. Подключите оба устройства.'),
+      NotReadableError: t('Не удалось включить камеру или микрофон. Проверьте, не заняты ли они другим приложением.'),
+      OverconstrainedError: t('Выбранное устройство недоступно. Выберите другую камеру или микрофон.'),
     };
     return explanations[error?.name] ? new Error(explanations[error.name]) : error;
   }
 
   async function startHost({ videoDeviceId, videoFacingMode, audioDeviceId, settings } = {}) {
-    if (destroyed) throw new Error('Наблюдение уже закрыто');
+    if (destroyed) throw new Error(t('Наблюдение уже закрыто'));
     if (host?.active) return;
     cancelCalibration();
     const state = session();
@@ -730,12 +732,12 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     state.sessionId = uuid();
     state.events = new Map();
     state.detector = new NoiseDetector(settings);
-    status('starting', 'Включаем камеру и микрофон…');
+    status('starting', t('Включаем камеру и микрофон…'));
     try {
-      if (!navigator.mediaDevices?.getUserMedia) throw new Error('Камера и микрофон доступны только через HTTPS или localhost.');
-      if (!globalThis.WebSocket) throw new Error('Этот браузер не поддерживает видеотрансляцию через WebSocket.');
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error(t('Камера и микрофон доступны только через HTTPS или localhost.'));
+      if (!globalThis.WebSocket) throw new Error(t('Этот браузер не поддерживает видеотрансляцию через WebSocket.'));
       const Audio = globalThis.AudioContext || globalThis.webkitAudioContext;
-      if (!Audio) throw new Error('Этот браузер не поддерживает обработку звука.');
+      if (!Audio) throw new Error(t('Этот браузер не поддерживает обработку звука.'));
       // Resume during the start click, before device permission can consume activation.
       state.audio = new Audio();
       void state.audio.resume().catch(error => { if (state.active) report(error); });
@@ -768,14 +770,14 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
         track.onended = () => {
           if (!state.active) return;
           void stopHost().then(() => {
-            const error = new Error('Доступ к камере или микрофону потерян. Запустите наблюдение снова.');
+            const error = new Error(t('Доступ к камере или микрофону потерян. Запустите наблюдение снова.'));
             report(error);
             status('error', error.message);
           });
         };
       }
       state.visibility = () => {
-        if (document.visibilityState !== 'visible') finishCalibration(state, { kind: 'cancelled', message: 'Калибровка отменена: вкладка скрыта. Вернитесь и повторите замер.' });
+        if (document.visibilityState !== 'visible') finishCalibration(state, { kind: 'cancelled', message: t('Калибровка отменена: вкладка скрыта. Вернитесь и повторите замер.') });
         if (document.visibilityState !== 'visible' || !state.active) return;
         void acquireWakeLock(state);
         void state.audio.resume().catch(report);
@@ -803,7 +805,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     cancelCalibration();
     const state = host;
     if (!state) return;
-    inputStatus(state, 'Микрофон выключен.');
+    inputStatus(state, t('Микрофон выключен.'));
     host = null;
     stopSession(state);
     state.capture?.close();
@@ -815,7 +817,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     state.events.clear();
     emit(onLocalStream, null);
     emit(onLevel, 0);
-    status('idle', 'Наблюдение остановлено');
+    status('idle', t('Наблюдение остановлено'));
     const cleanup = [state.audio?.close(), state.wakeLock?.release()].filter(Boolean);
     // A separate short-lived session lets stop be retried without retaining devices.
     const closing = session();
@@ -828,13 +830,13 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
   }
 
   async function startViewer({ mode = 'video' } = {}) {
-    if (destroyed) throw new Error('Наблюдение уже закрыто');
-    if (!['video', 'audio', 'audio-video'].includes(mode)) throw new Error('Неизвестный режим трансляции');
+    if (destroyed) throw new Error(t('Наблюдение уже закрыто'));
+    if (!['video', 'audio', 'audio-video'].includes(mode)) throw new Error(t('Неизвестный режим трансляции'));
     if (viewer?.active && viewer.mode === mode) return;
     // Teardown is synchronous, including silencing queued audio. Do not await
     // here: AudioContext.resume must retain the button's user activation.
     void stopViewer();
-    if (!globalThis.WebSocket) throw new Error('Этот браузер не поддерживает видеотрансляцию через WebSocket.');
+    if (!globalThis.WebSocket) throw new Error(t('Этот браузер не поддерживает видеотрансляцию через WebSocket.'));
     const state = session();
     state.role = 'viewer';
     state.mode = mode;
@@ -844,7 +846,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
         state.player = createAudioPlayer({ onStatus: value => {
           if (!state.active) return;
           state.outputBlocked = value.kind === 'blocked' || value.kind === 'error';
-          if (value.kind === 'waiting' && state.audioReceived) audioStatus(state, 'live', 'Слушаем звук дома');
+          if (value.kind === 'waiting' && state.audioReceived) audioStatus(state, 'live', t('Слушаем звук дома'));
           else audioStatus(state, value.kind, value.message);
         } });
         void resumeAudio();
@@ -852,8 +854,8 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
         state.outputBlocked = true;
         audioStatus(state, 'error', error.message);
       }
-    } else emit(onAudioStatus, { kind: 'idle', message: 'Звук выключен' });
-    status('connecting', 'Проверяем устройство питомца…');
+    } else emit(onAudioStatus, { kind: 'idle', message: t('Звук выключен') });
+    status('connecting', t('Проверяем устройство питомца…'));
     connectSocket(state);
   }
 
@@ -864,8 +866,8 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     stopSession(state);
     void state.player?.close();
     clearFrame(state);
-    emit(onAudioStatus, { kind: 'idle', message: 'Звук выключен' });
-    status('idle', 'Прямая трансляция выключена');
+    emit(onAudioStatus, { kind: 'idle', message: t('Звук выключен') });
+    status('idle', t('Прямая трансляция выключена'));
   }
 
   async function resumeAudio() {
@@ -874,7 +876,7 @@ export function createMonitor({ api, onStatus = noop, onAudioStatus = noop, onLe
     const revision = state.audioRevision || 0;
     const resumed = await state.player.resume();
     if (!resumed || !state.active || revision !== (state.audioRevision || 0)) return;
-    audioStatus(state, state.audioReceived ? 'live' : 'connecting', state.audioReceived ? 'Слушаем звук дома' : 'Ожидаем звук с устройства питомца…');
+    audioStatus(state, state.audioReceived ? 'live' : 'connecting', state.audioReceived ? t('Слушаем звук дома') : t('Ожидаем звук с устройства питомца…'));
   }
 
   function updateSettings(settings) {

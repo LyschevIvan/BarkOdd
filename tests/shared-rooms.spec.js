@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, russianContext } from './russian-fixture.js';
 
 const transport = process.env.BARKODD_TRANSPORT || 'websocket';
 const liveSelector = transport === 'webrtc' ? '#remote-video' : '#live-frame';
@@ -73,7 +73,7 @@ test(`${transport}: shared cameras stream independently and revoking one owner s
     return response.json();
   };
 
-  const secondContext = await browser.newContext();
+  const secondContext = await russianContext(browser);
   try {
     const second = await secondContext.newPage();
     const group = groupCard(page, groupName);

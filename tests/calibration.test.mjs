@@ -1,4 +1,5 @@
 import { strict as assert } from 'assert';
+import { setLanguage } from '../web/i18n.js';
 
 let calibration = {};
 try {
@@ -62,7 +63,8 @@ test('very quiet real input keeps the supported minimum threshold', () => {
 
 function assertError(result) {
   assert.equal(result.kind, 'error');
-  assert.match(result.message, /[а-я]/i, 'calibration errors explain the problem in Russian');
+  assert.match(result.message, /[a-z]/i, 'calibration errors explain the problem in English by default');
+  assert.doesNotMatch(result.message, /[а-я]/i);
 }
 
 test('digital silence is an error instead of a minimum-threshold calibration', () => {
@@ -187,16 +189,30 @@ test('the meter maps RMS levels onto a shared minus-80-to-zero-dBFS scale', () =
   for (const level of [NaN, Infinity, -1, undefined]) assert.equal(calibration.levelPosition(level), 0);
 });
 
-test('percentage labels retain useful precision below one percent with a Russian decimal separator', () => {
+test('percentage labels retain useful precision below one percent with an English decimal separator by default', () => {
   assert.equal(typeof calibration.formatLevel, 'function', 'formatLevel must show precise low microphone levels');
-  for (const [level, label] of [[0, '0%'], [0.0005, '0,05%'], [0.001234, '0,123%'], [0.0078123, '0,781%'], [0.01, '1%'], [0.123456, '12,35%'], [1, '100%']]) {
+  for (const [level, label] of [[0, '0%'], [0.0005, '0.05%'], [0.001234, '0.123%'], [0.0078123, '0.781%'], [0.01, '1%'], [0.123456, '12.35%'], [1, '100%']]) {
     assert.equal(calibration.formatLevel(level), label);
   }
 });
 
 test('percentage labels distinguish extremely quiet real input and unavailable input from digital silence', () => {
-  assert.equal(calibration.formatLevel(0.000001), '<0,001%');
+  assert.equal(calibration.formatLevel(0.000001), '<0.001%');
   for (const level of [NaN, Infinity, -1, 1.001, undefined, null]) assert.equal(calibration.formatLevel(level), '—');
+});
+
+test('language changes update microphone labels and calibration errors without restarting the module', () => {
+  try {
+    setLanguage('ru');
+    assert.equal(calibration.formatLevel(0.0005), '0,05%');
+    assert.equal(calibration.formatLevel(0.000001), '<0,001%');
+    assert.match(sample(0).result.message, /микрофон.*тишину/i);
+    setLanguage('en');
+    assert.equal(calibration.formatLevel(0.0005), '0.05%');
+    assert.match(sample(0).result.message, /microphone.*silence/i);
+  } finally {
+    setLanguage('en');
+  }
 });
 
 console.log(`${passed} calibration tests passed; ${failed} failed`);

@@ -2,102 +2,106 @@
 
 # 🐾 BarkOdd
 
-**Будьте рядом с питомцем, даже когда вас нет дома.**
+**English** · [Русский](README.ru.md)
 
-Камеры, живой звук и фотографии шумных моментов — в браузере, на вашем сервере.
+**Stay close to your pet, even when you're away from home.**
 
-[Быстрый старт](#быстрый-старт) · [Конфигурации](#конфигурации) · [Команды Make](#команды-make) · [Руководство](docs/guide.md)
+Cameras, live sound and photos of noisy moments — in your browser, on your own server.
+
+[Quick start](#quick-start) · [Configuration](#configuration) · [Make commands](#make-commands) · [Guide (Russian)](docs/guide.md)
 
 </div>
 
 ---
 
-BarkOdd превращает ноутбук, телефон или планшет в домашнюю камеру. Откройте комнату на устройстве питомца, включите наблюдение и смотрите с другого устройства. Мобильное приложение и отдельная сборка интерфейса не нужны: веб-интерфейс встроен в один Go-бинарник.
+BarkOdd turns a laptop, phone or tablet into a home camera. Open a room on the device staying with your pet, start monitoring and check in from another device. No mobile app or separate frontend build is needed: the web interface is embedded in a single Go binary.
 
-## Возможности
+The interface is available in English and Russian. English is the default; use **EN / RU** at the top of the page to switch languages. Your choice is saved in this browser.
 
-| | Что умеет BarkOdd |
+## Features
+
+| | What BarkOdd can do |
 |---|---|
-| 📹 Камеры | Несколько комнат и камер, выбор устройства и переключение просмотра. |
-| 🔊 Живой звук | Видео и звук включаются независимо для каждого зрителя. |
-| 🐕 События | Обнаружение шума, фотографии и история по каждой камере. |
-| 👥 Общий доступ | Несколько хозяев комнаты и гостевая QR-ссылка на отдельную камеру. |
-| 🔐 Режимы входа | Общий кабинет без входа, вход по коду или пользовательские аккаунты. |
-| 🏠 Свой сервер | Локальное файловое хранилище, Go или Docker, WebSocket или WebRTC. |
+| 📹 Cameras | Multiple rooms and cameras, device selection and switching between camera views. |
+| 🔊 Live sound | Each viewer can turn video and sound on independently. |
+| 🐕 Events | Sound detection, photos and history for each camera. |
+| 👥 Sharing | Multiple room owners and a guest QR link for each camera. |
+| 🔐 Sign-in modes | A shared dashboard without sign-in, code-based access or user accounts. |
+| 🏠 Your server | Local file storage, Go or Docker, WebSocket or WebRTC. |
 
-> Обнаруживается громкий звук, а не именно лай. Видео и звук не записываются; сохраняются события и фотографии. Для работы наблюдения страница камеры должна оставаться открытой, а устройство — бодрствовать.
+> BarkOdd detects loud sounds, not barking specifically. Video and audio are not recorded; events and photos are saved. Monitoring requires the camera page to stay open and the device to stay awake.
 
-## Быстрый старт
+## Quick start
 
-Все команды выполняются из корня репозитория. Поддерживаются macOS и Linux; в Windows используйте WSL2.
+Run all commands from the repository root. macOS and Linux are supported; use WSL2 on Windows.
 
-### С установленным Go
+### With Go installed
 
-Нужны **Go 1.23+**, **Make**, **Bash** и **OpenSSL**. Node.js для запуска приложения не нужен.
+You need **Go 1.23+**, **Make**, **Bash** and **OpenSSL**. Node.js is not needed to run the app.
 
 ```sh
 make run
 ```
 
-Команда подготовит `.env`, сгенерирует код входа, соберёт приложение и запустит его на **http://127.0.0.1:8080**. В другом терминале получите код:
+This prepares `.env`, generates a sign-in code, builds the app and starts it at **http://127.0.0.1:8080**. Get the code in another terminal:
 
 ```sh
 make admin-code
 ```
 
-Войдите, создайте комнату и выберите **«Устройство питомца»**. Разрешите доступ к камере и микрофону и включите наблюдение. Остановка сервера — `Ctrl+C`.
+Sign in, create a room and choose **“Pet device”**. Allow access to the camera and microphone, then start monitoring. Press `Ctrl+C` to stop the server.
 
-### Через Docker
+### With Docker
 
-Нужны **Docker с работающим daemon**, **Compose 2.20+**, **Make**, **Bash** и **OpenSSL**. Go на компьютере не требуется.
+You need **Docker with a running daemon**, **Compose 2.20+**, **Make**, **Bash** and **OpenSSL**. Go does not need to be installed on your computer.
 
 ```sh
 make docker-up
 make admin-code
 ```
 
-Откройте **http://127.0.0.1:8080**. Контейнер запускается в фоне; команда ждёт готовности приложения.
+Open **http://127.0.0.1:8080**. The container runs in the background; the command waits until the app is ready.
 
 ```sh
-make docker-logs  # Логи; Ctrl+C завершает только просмотр
-make docker-down # Остановка с сохранением данных
+make docker-logs  # View logs; Ctrl+C only stops following the logs
+make docker-down # Stop containers and keep your data
 ```
 
-> **Для телефона нужен HTTPS-адрес.** `127.0.0.1` и `localhost` доступны только на том устройстве, где запущен сервер. Для камеры на другом устройстве и просмотра вне дома настройте [публичный HTTPS или существующий прокси](docs/running.md#размещение-с-https). Обычный HTTP по IP в локальной сети не заменяет HTTPS для доступа браузера к камере.
+> **Your phone needs an HTTPS address.** `127.0.0.1` and `localhost` are only accessible on the device running the server. To use a camera on another device or check in from outside your home, set up [public HTTPS or an existing proxy (Russian)](docs/running.md#размещение-с-https). Plain HTTP over a local network IP does not replace HTTPS for browser camera access.
 
-## Конфигурации
+## Configuration
 
-### Вход
+### Sign-in
 
 ```sh
-make run-demo   # Общий кабинет без входа, только локально по умолчанию
-make run-admin  # Вход по сгенерированному коду
-make run-multi  # Регистрация пользователей и общие комнаты
+make run-demo   # Shared dashboard without sign-in; local access only by default
+make run-admin  # Sign in with a generated code
+make run-multi  # User registration and shared rooms
 ```
 
-`make run` берёт режим из `.env`; после первой настройки это `admin_code`. Для Docker режим задаётся тем же параметром:
+`make run` reads the mode from `.env`; the initial setup uses `admin_code`. Docker uses the same setting:
 
 ```sh
 make docker-up AUTH_MODE=multi_user
 ```
 
-Локальные режимы входа используют **раздельные данные**. Переключение в `multi_user` не мешает вернуться к демо. Нативное приложение и локальный Docker также имеют отдельные хранилища. Подробнее — [где лежат данные](docs/running.md#данные-и-переключение-режимов).
+Local sign-in modes use **separate data stores**. Switching to `multi_user` does not prevent you from returning to the demo. Native runs and local Docker runs also use separate storage. See [data locations (Russian)](docs/running.md#данные-и-переключение-режимов).
 
-### Видео и звук
+### Video and sound
 
-| Транспорт | Когда выбирать |
+| Transport | When to choose it |
 |---|---|
-| `websocket` — по умолчанию | Простой запуск: видео и звук проходят через сервер, достаточно HTTPS/WSS. |
-| `webrtc` | Прямой медиаканал между браузерами или через TURN. Для разных сетей может потребоваться отдельный TURN-сервер. |
+| `websocket` — default | A simple setup: video and sound pass through the server; HTTPS/WSS is enough. |
+| `webrtc` | A direct media connection between browsers, or through TURN. A separate TURN server may be needed across different networks. |
 
 ```sh
 make run-multi MEDIA_TRANSPORT=webrtc
 make docker-up AUTH_MODE=multi_user MEDIA_TRANSPORT=webrtc
 ```
 
-Транспорт не меняет хранилище выбранного режима входа. Остановите предыдущий экземпляр перед сменой конфигурации. Для сравнения на одном компьютере можно добавить `STUN_URLS=none`. [Настройка STUN/TURN →](docs/guide.md#stunturn-для-webrtc)
+Changing the transport does not change the data store for the selected sign-in mode. Stop the previous instance before switching configurations. For a comparison on one computer, you can add `STUN_URLS=none`. [STUN/TURN setup (Russian) →](docs/guide.md#stunturn-для-webrtc)
 
-### Порт и файл настроек
+### Port and settings file
 
 ```sh
 make run PORT=8090
@@ -106,52 +110,52 @@ make docker-up PORT=8090
 make docker-up DEPLOY=public ENV_FILE=.env.production
 ```
 
-При первом запуске отсутствующий файл `ENV_FILE` создаётся автоматически. Существующий файл и код входа сохраняются. Параметры командной строки имеют приоритет над `.env`; подробные правила и особенность `PUBLIC_URL` описаны в [инструкции запуска](docs/running.md).
+On the first run, a missing `ENV_FILE` is created automatically. Existing files and sign-in codes are preserved. Command-line settings take precedence over `.env`; see the [running guide (Russian)](docs/running.md) for the full rules and the special handling of `PUBLIC_URL`.
 
-## Команды Make
+## Make commands
 
-`make` или `make help` показывают доступные команды.
+Run `make` or `make help` to see the available commands.
 
-| Команда | Назначение |
+| Command | Purpose |
 |---|---|
-| `make init` | Создать `.env` со случайным кодом, если файла ещё нет. |
-| `make run` | Собрать и запустить приложение с локальными настройками. |
-| `make run-demo / run-admin / run-multi` | Запустить выбранный режим входа. |
-| `make admin-code` | Показать код входа из текущей конфигурации. |
-| `make build` | Собрать бинарник `bin/barkodd` со встроенным интерфейсом. |
-| `make docker-up` | Собрать и запустить контейнеры, дождаться готовности. |
-| `make docker-down` | Остановить контейнеры, сохранив volumes. |
-| `make docker-logs / docker-ps` | Посмотреть логи или состояние контейнеров. |
-| `make docker-config` | Проверить Compose-конфигурацию без вывода секретов. |
-| `make test` | Запустить Go-тесты с race detector и модульные JS-тесты. |
-| `make vet` | Проверить Go-код через `go vet`. |
+| `make init` | Create `.env` with a random code if the file does not exist. |
+| `make run` | Build and run the app with local settings. |
+| `make run-demo / run-admin / run-multi` | Run the selected sign-in mode. |
+| `make admin-code` | Show the sign-in code from the current configuration. |
+| `make build` | Build `bin/barkodd` with the embedded interface. |
+| `make docker-up` | Build and start the containers, then wait for readiness. |
+| `make docker-down` | Stop the containers while preserving volumes. |
+| `make docker-logs / docker-ps` | View container logs or status. |
+| `make docker-config` | Validate the Compose configuration without printing secrets. |
+| `make test` | Run Go tests with the race detector and JavaScript unit tests. |
+| `make vet` | Check Go code with `go vet`. |
 
-У Docker-команд параметр `DEPLOY=local|public|macmini` выбирает конфигурацию. Для остановки и просмотра логов используйте тот же `DEPLOY` и `ENV_FILE`, что при запуске.
+For Docker commands, `DEPLOY=local|public|macmini` selects the configuration. Use the same `DEPLOY` and `ENV_FILE` when stopping containers or viewing logs as you did when starting them.
 
-## Как это работает
+## How it works
 
 ```mermaid
 flowchart LR
-    Camera["Устройство питомца<br/>камера и микрофон"] <-->|"HTTPS / WebSocket"| Server["BarkOdd<br/>Go + файловое хранилище"]
-    Server <-->|"HTTPS / WebSocket"| Viewer["Браузер хозяина<br/>или гостя"]
-    Camera -. "WebRTC напрямую или через TURN" .-> Viewer
+    Camera["Pet's device<br/>camera and microphone"] <-->|"HTTPS / WebSocket"| Server["BarkOdd<br/>Go + file storage"]
+    Server <-->|"HTTPS / WebSocket"| Viewer["Owner's or guest's<br/>browser"]
+    Camera -. "WebRTC directly or through TURN" .-> Viewer
 ```
 
-В режиме WebSocket сервер передаёт видео и звук. В WebRTC он обслуживает доступ и согласование соединения; медиаданные идут между браузерами либо через TURN. События и фотографии сохраняются на сервере в обоих режимах.
+In WebSocket mode, the server relays video and sound. In WebRTC mode, it handles access and connection signaling; media travels between browsers or through TURN. Events and photos are saved on the server in both modes.
 
-## Документация и разработка
+## Documentation and development
 
-- [Запуск, `.env`, Docker, HTTPS и устранение ошибок](docs/running.md)
-- [Полное руководство: камеры, доступ, события, TURN, резервные копии и браузерные тесты](docs/guide.md)
-- [Архитектура проекта](docs/design.md)
-- [Пример переменных окружения](.env.example)
+- [Running the app, `.env`, Docker, HTTPS and troubleshooting (Russian)](docs/running.md)
+- [Full guide: cameras, access, events, TURN, backups and browser tests (Russian)](docs/guide.md)
+- [Project architecture (Russian)](docs/design.md)
+- [Example environment variables](.env.example)
 
-Исходники сервера находятся в `cmd/barkodd/` и `internal/server/`, интерфейс — в `web/`, браузерные тесты — в `tests/`.
+Server code is in `cmd/barkodd/` and `internal/server/`, the interface is in `web/`, and browser tests are in `tests/`.
 
 ```sh
 make build
-make test  # Go 1.23+, C toolchain для race detector, Node.js 20+ и npm
+make test  # Go 1.23+, a C toolchain for the race detector, Node.js 20+ and npm
 make vet
 ```
 
-Node.js нужен только для проверок разработки. Браузерные тесты требуют отдельного тестового сервера и Playwright: [порядок запуска](docs/guide.md#проверки-разработки).
+Node.js is only needed for development checks. Browser tests require a separate test server and Playwright: see the [test instructions (Russian)](docs/guide.md#проверки-разработки).

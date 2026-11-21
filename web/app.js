@@ -1,3 +1,4 @@
+import { t, getLocale, getLanguage, setLanguage, translateMessage, applyTranslations } from './i18n.js';
 import { createMonitor } from './media.js';
 import { DEFAULT_NOISE_THRESHOLD } from './noise.js';
 import { thresholdToSlider, sliderToThreshold, levelPosition, formatLevel } from './calibration.js';
@@ -37,7 +38,7 @@ let toastTimer = null;
 let hostRunning = false;
 let viewerWatching = false;
 let viewerListening = false;
-let audioState = { kind: 'idle', message: 'Звук выключен' };
+let audioState = { kind: 'idle', message: t('Звук выключен') };
 let viewerLive = false;
 let mediaBusy = false;
 let mediaMessage = '';
@@ -53,6 +54,7 @@ let appliedThreshold = DEFAULT_NOISE_THRESHOLD;
 let soundLevel = 0;
 let microphoneReady = false;
 let calibrationState = { kind: 'idle' };
+let calibrationFeedbackState = null;
 let settingsSaving = false;
 let latestPhoto = null;
 let photoEpoch = 0;
@@ -90,7 +92,7 @@ function readBindings() {
 }
 function saveBindings() {
   try { localStorage.setItem(storageKey(), JSON.stringify(bindings)); }
-  catch (_) { toast('Браузер не разрешил сохранить привязку. После перезагрузки понадобится ссылка.'); }
+  catch (_) { toast(t('Браузер не разрешил сохранить привязку. После перезагрузки понадобится ссылка.')); }
 }
 function saveGuest(binding) {
   try { localStorage.setItem(GUEST_STORAGE_KEY, JSON.stringify({ role: 'viewer', viewer: binding })); localStorage.setItem('barkodd.guest-active.v2', 'true'); }
@@ -117,7 +119,7 @@ function renderAccount() {
   }
   $('account-tools').hidden = !user;
   $('account-tools').dataset.userId = user?.id || '';
-  $('account-name').textContent = auth.mode === 'none' ? 'Общий кабинет' : user?.username || '';
+  renderAccountText();
   $('logout').hidden = auth.mode === 'none';
   $('password-toggle').hidden = !user || user.role !== 'user';
   $('auth-panel').hidden = !!user || !auth.mode || auth.mode === 'none';
@@ -125,11 +127,15 @@ function renderAccount() {
   $('choose-host').hidden = !user;
   $('users-toggle').hidden = auth.mode !== 'multi_user' || user?.role !== 'admin';
   $('auth-tabs').hidden = auth.mode !== 'multi_user';
-  $('auth-description').textContent = auth.mode === 'multi_user' ? 'Войдите или зарегистрируйтесь. Гостевые ссылки открываются без входа.' : 'Код владельца нужен только для входа. Гостевые ссылки открываются без входа.';
   $('code-form').hidden = !!user || !(auth.mode === 'admin_code' || authView === 'admin');
   $('login-form').hidden = !!user || auth.mode !== 'multi_user' || authView !== 'login';
   $('register-form').hidden = !!user || auth.mode !== 'multi_user' || authView !== 'register';
   $('password-panel').hidden = true;
+}
+
+function renderAccountText() {
+  $('account-name').textContent = auth.mode === 'none' ? t('Общий кабинет') : auth.user?.username || '';
+  $('auth-description').textContent = auth.mode === 'multi_user' ? t('Войдите или зарегистрируйтесь. Гостевые ссылки открываются без входа.') : t('Код владельца нужен только для входа. Гостевые ссылки открываются без входа.');
 }
 async function loadRooms() {
   if (!auth.user) return;
@@ -155,7 +161,7 @@ function renderGroup(group, actor, navigation) {
   const current = () => sameActor(actor) && navigation === navigationSequence;
   const feedback = card.querySelector('.group-feedback');
   function showGroupError(message) {
-    feedback.textContent = message;
+    feedback.textContent = translateMessage(message);
     feedback.hidden = !message;
   }
   let pending = false;
@@ -187,10 +193,10 @@ function renderGroup(group, actor, navigation) {
     const entry = textElement('article', 'owned-room', '');
     const info = textElement('div', 'room-info', '');
     const status = camera.monitoring ? 'Наблюдение включено' : camera.online ? 'Устройство в сети' : 'Устройство не в сети';
-    info.append(textElement('h5', '', camera.name), textElement('p', 'field-hint', status));
+    info.append(textElement('h5', '', camera.name), localizedElement('p', 'field-hint', status));
     const actions = textElement('div', 'account-actions', '');
     for (const [role, label] of [['host', 'Устройство питомца'], ['viewer', 'Просмотр']]) {
-      const button = textElement('button', 'button button-secondary', label);
+      const button = localizedElement('button', 'button button-secondary', label);
       button.type = 'button';
       button.addEventListener('click', () => { if (current()) void openRoom(role, accountBinding(camera.id), actor); });
       actions.append(button);
@@ -202,7 +208,7 @@ function renderGroup(group, actor, navigation) {
   addCamera.addEventListener('submit', event => {
     event.preventDefault();
     const name = addCamera.elements.name.value.trim();
-    if (!name) { showGroupError('Дайте камере название.'); return; }
+    if (!name) { showGroupError(t('Дайте камере название.')); return; }
     void change(addCamera.querySelector('button'), '/cameras', { method: 'POST', body: { name } }, async camera => {
       if (camera.ownerId !== actor.id) { await refreshAuth(); return; }
       await openRoom('host', { id: camera.id, account: true, viewerToken: camera.viewerToken }, actor);
@@ -210,10 +216,10 @@ function renderGroup(group, actor, navigation) {
   });
   const deleteGroup = card.querySelector('.delete-group');
   deleteGroup.addEventListener('click', () => {
-    if (!window.confirm(`Удалить комнату «${group.name}» со всеми камерами, их историей и фотографиями? Гостевые ссылки перестанут работать.`)) return;
+    if (!window.confirm(t('Удалить комнату «{name}» со всеми камерами, их историей и фотографиями? Гостевые ссылки перестанут работать.', { name: group.name }))) return;
     void change(deleteGroup, '', { method: 'DELETE' }, async result => {
       forgetCameraBindings(group.cameras);
-      toast(result?.cleanupPending ? 'Комната удалена. Сервер завершит очистку фотографий.' : 'Комната и все её камеры удалены.');
+      toast(result?.cleanupPending ? t('Комната удалена. Сервер завершит очистку фотографий.') : t('Комната и все её камеры удалены.'));
       await loadRooms();
     });
   });
@@ -224,32 +230,37 @@ function renderGroup(group, actor, navigation) {
   const memberList = members.querySelector('.room-members');
   for (const member of group.members) {
     const row = textElement('li', 'room-member', '');
-    const label = member.username + (member.id === actor.id ? ' (вы)' : '') + (member.disabled ? ' · заблокирован' : '');
-    const remove = textElement('button', 'text-button', 'Удалить хозяина');
+    const label = textElement('span', '', member.username);
+    if (member.id === actor.id) label.append(localizedElement('span', '', ' (вы)'));
+    if (member.disabled) label.append(localizedElement('span', '', ' · заблокирован'));
+    const remove = localizedElement('button', 'text-button', 'Удалить хозяина');
     remove.type = 'button';
     remove.disabled = group.members.length === 1;
-    if (remove.disabled) remove.title = 'В комнате должен остаться хотя бы один хозяин';
+    if (remove.disabled) {
+      remove.dataset.i18nTitle = 'В комнате должен остаться хотя бы один хозяин';
+      remove.title = t(remove.dataset.i18nTitle);
+    }
     remove.addEventListener('click', () => {
-      const prompt = member.id === actor.id ? `Выйти из комнаты «${group.name}»?` : `Удалить хозяина «${member.username}» из комнаты «${group.name}»?`;
+      const prompt = member.id === actor.id ? t('Выйти из комнаты «{name}»?', { name: group.name }) : t('Удалить хозяина «{username}» из комнаты «{name}»?', { username: member.username, name: group.name });
       if (!window.confirm(prompt)) return;
       void change(remove, `/members/${encodeURIComponent(member.id)}`, { method: 'DELETE' }, async () => {
         if (member.id === actor.id) forgetCameraBindings(group.cameras);
         await loadRooms();
       });
     });
-    row.append(textElement('span', '', label), remove);
+    row.append(label, remove);
     memberList.append(row);
   }
   const addMember = members.querySelector('.add-room-member');
   addMember.addEventListener('submit', event => {
     event.preventDefault();
     const username = addMember.elements.username.value.trim();
-    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(username)) { showGroupError('Введите логин существующего аккаунта.'); return; }
+    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(username)) { showGroupError(t('Введите логин существующего аккаунта.')); return; }
     void change(addMember.querySelector('button'), '/members', { method: 'POST', body: { username } });
   });
   return card;
 }
-async function loseAccount(message = 'Сессия завершена. Войдите снова, чтобы открыть свои комнаты.', actor = authActor()) {
+async function loseAccount(message = t('Сессия завершена. Войдите снова, чтобы открыть свои комнаты.'), actor = authActor()) {
   if (!sameActor(actor) || !auth.user) return;
   beginIdentityChange();
   auth.user = null;
@@ -273,7 +284,7 @@ async function refreshAuth() {
     renderAccount();
     // Guest QR access stays independent from a revoked account session.
     if (active && !active.binding.account) return;
-    await showWelcome(state.user ? '' : 'Сессия завершена. Войдите снова, чтобы открыть свои комнаты.');
+    await showWelcome(state.user ? '' : t('Сессия завершена. Войдите снова, чтобы открыть свои комнаты.'));
   } catch (_) { /* Room polling reports temporary network loss. */ }
 }
 async function authenticate(form, path, body) {
@@ -304,14 +315,14 @@ async function request(url, { method = 'GET', body, token, blob = false, actorID
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     const response = await fetch(new URL(url, APP_BASE), { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal, cache: 'no-store', credentials: 'same-origin', referrerPolicy: 'no-referrer' });
     if (!response.ok) {
-      let message = `Ошибка сервера (${response.status})`;
+      let message = t('Ошибка сервера ({status})', { status: response.status });
       try { const data = await response.json(); if (data.error) message = String(data.error); } catch (_) { /* Non-JSON proxy error. */ }
-      throw new APIError(message, response.status);
+      throw new APIError(translateMessage(message), response.status);
     }
     return blob ? await response.blob() : response.status === 204 ? null : await response.json();
   } catch (error) {
-    if (error.name === 'AbortError') throw new Error('Сервер долго не отвечает. Проверьте подключение к интернету.');
-    if (error instanceof TypeError) throw new Error('Нет связи с сервером. Проверьте подключение к интернету.');
+    if (error.name === 'AbortError') throw new Error(t('Сервер долго не отвечает. Проверьте подключение к интернету.'));
+    if (error instanceof TypeError) throw new Error(t('Нет связи с сервером. Проверьте подключение к интернету.'));
     throw error;
   } finally { clearTimeout(timeout); }
 }
@@ -395,39 +406,39 @@ function decodeLiveFrame() {
 
 function showError(message, welcome = !active) {
   const target = $(welcome ? 'welcome-alert' : 'dashboard-alert');
-  target.textContent = message;
+  target.textContent = translateMessage(message);
   target.hidden = !message;
 }
 
 function toast(message) {
   clearTimeout(toastTimer);
-  $('toast').textContent = message;
+  $('toast').textContent = translateMessage(message);
   $('toast').hidden = false;
   toastTimer = setTimeout(() => { $('toast').hidden = true; }, 4200);
 }
 
 function dateValue(value) { const d = value ? new Date(value) : null; return d && !Number.isNaN(d.getTime()) ? d : null; }
-function fullDate(value) { const d = dateValue(value); return d ? new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(d) : 'Время неизвестно'; }
-function shortDate(value) { const d = dateValue(value); return d ? new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(d) : 'Время неизвестно'; }
+function fullDate(value) { const d = dateValue(value); return d ? new Intl.DateTimeFormat(getLocale(), { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(d) : t('Время неизвестно'); }
+function shortDate(value) { const d = dateValue(value); return d ? new Intl.DateTimeFormat(getLocale(), { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(d) : t('Время неизвестно'); }
 function relativeTime(value) {
   const d = dateValue(value);
-  if (!d) return 'Пока не было';
+  if (!d) return t('Пока не было');
   const seconds = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
-  if (seconds < 15) return 'Только что';
-  if (seconds < 60) return `${seconds} сек. назад`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} мин. назад`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} ч. назад`;
-  return new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short' }).format(d);
+  if (seconds < 15) return t('Только что');
+  if (seconds < 60) return t('{count} сек. назад', { count: seconds });
+  if (seconds < 3600) return t('{count} мин. назад', { count: Math.floor(seconds / 60) });
+  if (seconds < 86400) return t('{count} ч. назад', { count: Math.floor(seconds / 3600) });
+  return new Intl.DateTimeFormat(getLocale(), { day: 'numeric', month: 'short' }).format(d);
 }
 
 function parsePairingLink(value) {
   let link;
-  try { link = new URL(value, APP_BASE); } catch (_) { throw new Error('Не удалось прочитать ссылку. Скопируйте её целиком с устройства питомца.'); }
-  if (link.origin !== location.origin) throw new Error('Эта ссылка ведёт на другой сервер BarkOdd. Откройте её напрямую в браузере.');
+  try { link = new URL(value, APP_BASE); } catch (_) { throw new Error(t('Не удалось прочитать ссылку. Скопируйте её целиком с устройства питомца.')); }
+  if (link.origin !== location.origin) throw new Error(t('Эта ссылка ведёт на другой сервер BarkOdd. Откройте её напрямую в браузере.'));
   const params = new URLSearchParams(link.hash.slice(1));
   const id = params.get('room');
   const viewerToken = params.get('key');
-  if (!id || !/^[a-zA-Z0-9_-]{1,128}$/.test(id) || !viewerToken || viewerToken.length > 256) throw new Error('В ссылке не хватает камеры или ключа. Скопируйте полную ссылку с устройства питомца.');
+  if (!id || !/^[a-zA-Z0-9_-]{1,128}$/.test(id) || !viewerToken || viewerToken.length > 256) throw new Error(t('В ссылке не хватает камеры или ключа. Скопируйте полную ссылку с устройства питомца.'));
   return { id, viewerToken };
 }
 
@@ -477,7 +488,7 @@ async function releaseRoom() {
   hostRunning = false;
   viewerWatching = false;
   viewerListening = false;
-  audioState = { kind: 'idle', message: 'Звук выключен' };
+  audioState = { kind: 'idle', message: t('Звук выключен') };
   viewerLive = false;
   mediaBusy = false;
   mediaMessage = '';
@@ -491,6 +502,7 @@ async function releaseRoom() {
   soundLevel = 0;
   microphoneReady = false;
   calibrationState = { kind: 'idle' };
+  calibrationFeedbackState = null;
   settingsSaving = false;
   $('calibration-feedback').textContent = '';
   $('settings-feedback').textContent = '';
@@ -511,7 +523,7 @@ async function showWelcome(message = '', verifyAccount = false) {
   $('choose-viewer').classList.remove('selected');
   $('forget-binding').hidden = !bindings.host && !bindings.viewer;
   showError(message, true);
-  document.title = 'BarkOdd — рядом, даже издалека';
+  document.title = t('BarkOdd — рядом, даже издалека');
   renderAccount();
   if (verifyAccount) await refreshAuth();
   if (sameActor(actor) && navigation === navigationSequence && auth.user) await loadRooms();
@@ -522,7 +534,7 @@ async function invalidateSession(error) {
   const missing = error.status === 404;
   if (active.binding.account) {
     forgetCameraBindings([active.binding]);
-    await showWelcome(missing ? 'Камера не найдена.' : 'Доступ к камере отозван.', !missing);
+    await showWelcome(missing ? t('Камера не найдена.') : t('Доступ к камере отозван.'), !missing);
     return;
   }
   try {
@@ -530,7 +542,7 @@ async function invalidateSession(error) {
     localStorage.removeItem('barkodd.guest-active.v2');
   } catch (_) {}
   if (!auth.user) bindings = emptyBindings();
-  await showWelcome(missing ? 'Камера не найдена. Получите актуальную ссылку.' : 'Ссылка больше не действует. На устройстве питомца получите новую ссылку или QR-код.');
+  await showWelcome(missing ? t('Камера не найдена. Получите актуальную ссылку.') : t('Ссылка больше не действует. На устройстве питомца получите новую ссылку или QR-код.'));
 }
 
 async function chooseRole(role) {
@@ -564,8 +576,8 @@ async function openRoom(role, binding, actor = authActor(), viewing = null) {
   $('welcome').hidden = true;
   $('dashboard').hidden = false;
   $('switch-role').hidden = false;
-  $('role-label').textContent = binding.account ? 'Мои комнаты' : 'Сменить устройство';
-  $('room-title').textContent = 'Подключаемся…';
+  $('role-label').textContent = binding.account ? t('Мои комнаты') : t('Сменить устройство');
+  $('room-title').textContent = t('Подключаемся…');
   $('host-settings').hidden = role !== 'host';
   $('pairing-panel').hidden = role !== 'host';
   $('delete-room-panel').hidden = true;
@@ -573,14 +585,14 @@ async function openRoom(role, binding, actor = authActor(), viewing = null) {
   $('host-note').hidden = role !== 'host';
   $('viewer-note').hidden = role !== 'viewer';
   $('stream-note').hidden = role !== 'viewer';
-  $('video-heading-text').textContent = role === 'host' ? 'Камера питомца' : 'Камера дома';
+  $('video-heading-text').textContent = role === 'host' ? t('Камера питомца') : t('Камера дома');
   $('event-history').replaceChildren();
   $('history-empty').hidden = false;
   $('event-count').textContent = '0';
   $('clear-history').hidden = !binding.account;
   $('clear-history').disabled = true;
-  $('last-noise-value').textContent = 'Пока не было';
-  $('last-noise-detail').textContent = 'Здесь появится время события';
+  $('last-noise-value').textContent = t('Пока не было');
+  $('last-noise-detail').textContent = t('Здесь появится время события');
   $('settings-feedback').textContent = '';
   $('local-pairing-hint').hidden = !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
   mediaBusy = !!viewing;
@@ -626,17 +638,9 @@ async function openRoom(role, binding, actor = authActor(), viewing = null) {
     onCalibration(result) {
       if (generation !== current) return;
       calibrationState = result;
-      if (result.kind === 'complete') {
-        changeThreshold(result.threshold);
-        $('calibration-feedback').textContent = `Фон измерен: ${formatLevel(result.noiseFloor)}. Предлагаемый порог: ${formatLevel(result.threshold)}. При необходимости подправьте его и сохраните настройки.`;
-      } else if (result.kind === 'calibrating') {
-        const message = `Измеряем фон… Осталось ${Math.ceil(result.remainingMs / 1000)} с. Новые шумовые события пока не создаются.`;
-        if ($('calibration-feedback').textContent !== message) $('calibration-feedback').textContent = message;
-      } else if (result.kind === 'starting') {
-        $('calibration-feedback').textContent = result.message || 'Разрешите доступ к микрофону. Замер начнётся после подключения.';
-      } else {
-        $('calibration-feedback').textContent = result.message || 'Калибровка отменена. Порог не изменён.';
-      }
+      calibrationFeedbackState = result;
+      if (result.kind === 'complete') changeThreshold(result.threshold);
+      renderCalibrationFeedback();
       renderMedia();
       if (result.kind === 'complete') void loadDevices();
     },
@@ -658,13 +662,13 @@ async function openRoom(role, binding, actor = authActor(), viewing = null) {
       const video = $('remote-video');
       if (video.srcObject !== stream) video.srcObject = stream;
       if (!stream) { video.pause(); viewerLive = false; }
-      else video.play().catch(() => { if (generation === current) showError('Не удалось воспроизвести видео. Выключите и включите просмотр.'); });
+      else video.play().catch(() => { if (generation === current) showError(t('Не удалось воспроизвести видео. Выключите и включите просмотр.')); });
       renderMedia();
     },
     onError(error) {
       if (generation !== current) return;
       if ((!error.sessionEnded || error.status === 401) && [401, 403, 404].includes(error.status)) { void invalidateSession(error); return; }
-      showError(error.message || 'Не удалось подключиться к камере. Попробуйте ещё раз.');
+      showError(error.message || t('Не удалось подключиться к камере. Попробуйте ещё раз.'));
     },
   });
   renderMedia();
@@ -738,7 +742,7 @@ async function pollRoom(current) {
     serverReachable = false;
     renderStatus();
     renderMedia();
-    showError('Нет связи с сервером. Показаны последние полученные данные; пробуем подключиться снова.');
+    showError(t('Нет связи с сервером. Показаны последние полученные данные; пробуем подключиться снова.'));
   } finally {
     if (current === generation && sequence === roomPollSequence && active) pollTimer = setTimeout(() => void pollRoom(current), 2000);
   }
@@ -746,12 +750,12 @@ async function pollRoom(current) {
 
 function renderStatus() {
   let state = 'idle';
-  let text = 'Подключаемся';
-  if (!serverReachable) { state = 'offline'; text = 'Нет связи с сервером'; }
+  let text = t('Подключаемся');
+  if (!serverReachable) { state = 'offline'; text = t('Нет связи с сервером'); }
   else if (room) {
-    if (!room.online) { state = 'offline'; text = active.role === 'host' && !hostRunning ? 'Наблюдение выключено' : 'Устройство не в сети'; }
-    else if (room.monitoring) { state = 'online'; text = 'Наблюдение включено'; }
-    else { text = 'Наблюдение выключено'; }
+    if (!room.online) { state = 'offline'; text = active.role === 'host' && !hostRunning ? t('Наблюдение выключено') : t('Устройство не в сети'); }
+    else if (room.monitoring) { state = 'online'; text = t('Наблюдение включено'); }
+    else { text = t('Наблюдение выключено'); }
   }
   $('room-status').dataset.state = state;
   $('room-status-text').textContent = text;
@@ -759,10 +763,10 @@ function renderStatus() {
 
 function renderTimes() {
   $('last-noise-value').textContent = relativeTime(room.lastNoiseAt);
-  $('last-noise-detail').textContent = room.lastNoiseAt ? fullDate(room.lastNoiseAt) : 'Здесь появится время события';
+  $('last-noise-detail').textContent = room.lastNoiseAt ? fullDate(room.lastNoiseAt) : t('Здесь появится время события');
   $('event-count').textContent = String(room.eventCount || (room.events || []).length);
   $('clear-history').disabled = clearingHistory || !(room.events?.length || room.lastNoiseAt);
-  $('clear-history').textContent = clearingHistory ? 'Очищаем…' : 'Очистить историю';
+  $('clear-history').textContent = clearingHistory ? t('Очищаем…') : t('Очистить историю');
 }
 
 async function clearHistory() {
@@ -795,7 +799,7 @@ async function clearHistory() {
     historyLimit = 12;
     historySignature = '';
     renderHistory();
-    toast(result.cleanupPending ? 'История очищена. Сервер завершит удаление фотографий.' : 'История и фотографии очищены');
+    toast(result.cleanupPending ? t('История очищена. Сервер завершит удаление фотографий.') : t('История и фотографии очищены'));
   } catch (error) {
     if (current === generation) showError(error.message);
   } finally {
@@ -819,22 +823,22 @@ function renderMedia() {
   video.hidden = !isHost || !visible;
   remoteVideo.hidden = isHost || !rtc || !visible;
   $('live-frame').hidden = isHost || rtc || !visible;
-  $('stream-note').textContent = rtc ? 'WebRTC · видео и звук по запросу' : 'WebSocket · видео до 5 кадров/с · звук по запросу';
+  $('stream-note').textContent = rtc ? t('WebRTC · видео и звук по запросу') : t('WebSocket · видео до 5 кадров/с · звук по запросу');
   $('video-placeholder').hidden = visible;
   $('video-corner').hidden = !visible;
-  $('video-corner-text').textContent = isHost ? 'ЛОКАЛЬНЫЙ ПРЕДПРОСМОТР' : 'ПРЯМО СЕЙЧАС';
-  $('video-mode').textContent = visible ? isHost ? 'НАБЛЮДЕНИЕ' : 'В ПРЯМОМ ЭФИРЕ' : mediaBusy ? 'ПОДКЛЮЧЕНИЕ' : !isHost && viewerListening ? 'ТОЛЬКО ЗВУК' : 'КАМЕРА ВЫКЛЮЧЕНА';
+  $('video-corner-text').textContent = isHost ? t('ЛОКАЛЬНЫЙ ПРЕДПРОСМОТР') : t('ПРЯМО СЕЙЧАС');
+  $('video-mode').textContent = visible ? isHost ? t('НАБЛЮДЕНИЕ') : t('В ПРЯМОМ ЭФИРЕ') : mediaBusy ? t('ПОДКЛЮЧЕНИЕ') : !isHost && viewerListening ? t('ТОЛЬКО ЗВУК') : t('КАМЕРА ВЫКЛЮЧЕНА');
   const running = isHost ? hostRunning : viewerWatching;
   $('capture-button').disabled = mediaBusy || (isHost && !hostRunning && calibrationBusy());
-  setButtonLabel('capture-button', mediaBusy ? 'Подключаемся…' : isHost ? running ? 'Остановить наблюдение' : 'Включить наблюдение' : running ? 'Выключить видео' : 'Включить видео');
+  setButtonLabel('capture-button', mediaBusy ? t('Подключаемся…') : isHost ? running ? t('Остановить наблюдение') : t('Включить наблюдение') : running ? t('Выключить видео') : t('Включить видео'));
   $('capture-button').querySelector('use').setAttribute('href', running ? '#i-stop' : '#i-play');
   $('capture-button').setAttribute('aria-pressed', String(running));
   $('audio-button').hidden = isHost;
   $('audio-button').disabled = mediaBusy;
   $('audio-button').setAttribute('aria-pressed', String(viewerListening));
-  setButtonLabel('audio-button', viewerListening ? 'Выключить звук' : 'Включить звук');
+  setButtonLabel('audio-button', viewerListening ? t('Выключить звук') : t('Включить звук'));
   $('audio-status').hidden = isHost;
-  $('audio-status').textContent = viewerListening ? audioState.message || 'Подключаем звук…' : 'Звук выключен';
+  $('audio-status').textContent = viewerListening ? translateMessage(audioState.message) || t('Подключаем звук…') : t('Звук выключен');
   $('audio-status').dataset.state = audioState.kind;
   $('audio-retry').hidden = isHost || !viewerListening || audioState.kind !== 'blocked';
   $('audio-retry').disabled = mediaBusy;
@@ -843,31 +847,31 @@ function renderMedia() {
   renderSoundControls();
   renderSoundLevel();
   const microphoneLabel = isHost && video.srcObject?.getAudioTracks()[0]?.label;
-  $('device-hint').textContent = hostRunning ? `${microphoneLabel ? `Микрофон: ${microphoneLabel}. ` : ''}Чтобы сменить камеру или микрофон, остановите наблюдение.` : 'Названия устройств появятся после разрешения доступа.';
+  $('device-hint').textContent = hostRunning ? (microphoneLabel ? t('Микрофон: {name}. ', { name: microphoneLabel }) : '') + t('Чтобы сменить камеру или микрофон, остановите наблюдение.') : t('Названия устройств появятся после разрешения доступа.');
   if (isHost) {
-    $('video-placeholder-title').textContent = mediaBusy ? 'Устраиваемся поудобнее' : 'Тихое место для вашего друга';
-    $('video-placeholder-text').textContent = mediaBusy ? 'Разрешите доступ к камере и микрофону в браузере.' : 'Включите наблюдение, когда будете готовы. Новый запуск очистит предыдущую историю.';
-    $('media-status').textContent = mediaMessage || (hostRunning ? 'Слушаем звуки и сохраняем домашние моменты' : 'Камера и микрофон выключены');
+    $('video-placeholder-title').textContent = mediaBusy ? t('Устраиваемся поудобнее') : t('Тихое место для вашего друга');
+    $('video-placeholder-text').textContent = mediaBusy ? t('Разрешите доступ к камере и микрофону в браузере.') : t('Включите наблюдение, когда будете готовы. Новый запуск очистит предыдущую историю.');
+    $('media-status').textContent = translateMessage(mediaMessage) || (hostRunning ? t('Слушаем звуки и сохраняем домашние моменты') : t('Камера и микрофон выключены'));
     if (!hostRunning && calibrationBusy()) {
-      $('video-placeholder-title').textContent = calibrationState.kind === 'starting' ? 'Подключаем микрофон' : 'Измеряем фон комнаты';
-      $('video-placeholder-text').textContent = 'Камера выключена. Калибровка не меняет историю наблюдения.';
-      $('media-status').textContent = 'Только микрофон · настройка чувствительности';
+      $('video-placeholder-title').textContent = calibrationState.kind === 'starting' ? t('Подключаем микрофон') : t('Измеряем фон комнаты');
+      $('video-placeholder-text').textContent = t('Камера выключена. Калибровка не меняет историю наблюдения.');
+      $('media-status').textContent = t('Только микрофон · настройка чувствительности');
     }
   } else {
     if (!serverReachable) {
-      $('video-placeholder-title').textContent = 'Проверяем связь';
-      $('video-placeholder-text').textContent = 'Сервер пока недоступен. Последние события остаются в истории.';
+      $('video-placeholder-title').textContent = t('Проверяем связь');
+      $('video-placeholder-text').textContent = t('Сервер пока недоступен. Последние события остаются в истории.');
     } else if (room && (!room.online || !room.monitoring)) {
-      $('video-placeholder-title').textContent = room.online ? 'Наблюдение на паузе' : 'Устройство питомца не в сети';
-      $('video-placeholder-text').textContent = room.online ? 'На домашнем устройстве нужно включить наблюдение.' : 'Проверьте домашний интернет, открытую вкладку и режим сна ноутбука.';
+      $('video-placeholder-title').textContent = room.online ? t('Наблюдение на паузе') : t('Устройство питомца не в сети');
+      $('video-placeholder-text').textContent = room.online ? t('На домашнем устройстве нужно включить наблюдение.') : t('Проверьте домашний интернет, открытую вкладку и режим сна ноутбука.');
     } else if (viewerListening && !viewerWatching) {
-      $('video-placeholder-title').textContent = audioState.kind === 'live' ? 'Слушаем дом' : audioState.kind === 'blocked' ? 'Нужно включить воспроизведение' : audioState.kind === 'error' ? 'Звук недоступен' : 'Подключаем звук';
-      $('video-placeholder-text').textContent = 'Видео не передаётся. Можно включить его в любой момент. История шума и фотографии продолжают обновляться.';
+      $('video-placeholder-title').textContent = audioState.kind === 'live' ? t('Слушаем дом') : audioState.kind === 'blocked' ? t('Нужно включить воспроизведение') : audioState.kind === 'error' ? t('Звук недоступен') : t('Подключаем звук');
+      $('video-placeholder-text').textContent = t('Видео не передаётся. Можно включить его в любой момент. История шума и фотографии продолжают обновляться.');
     } else {
-      $('video-placeholder-title').textContent = viewerWatching ? 'Соединяем вас с домом' : 'Питомец ближе, чем кажется';
-      $('video-placeholder-text').textContent = viewerWatching ? 'Подключаем камеру. Это может занять несколько секунд.' : 'Включите видео, звук или оба сразу. История доступна и без трансляции.';
+      $('video-placeholder-title').textContent = viewerWatching ? t('Соединяем вас с домом') : t('Питомец ближе, чем кажется');
+      $('video-placeholder-text').textContent = viewerWatching ? t('Подключаем камеру. Это может занять несколько секунд.') : t('Включите видео, звук или оба сразу. История доступна и без трансляции.');
     }
-    $('media-status').textContent = viewerWatching ? !remoteOnline ? 'Ждём устройство питомца. Подключимся автоматически.' : mediaMessage || 'Соединяемся с домашней камерой' : 'Видео выключено · история продолжает обновляться';
+    $('media-status').textContent = viewerWatching ? !remoteOnline ? t('Ждём устройство питомца. Подключимся автоматически.') : translateMessage(mediaMessage) || t('Соединяемся с домашней камерой') : t('Видео выключено · история продолжает обновляться');
   }
 }
 
@@ -877,7 +881,9 @@ function fillSettings(settings) {
   renderThreshold();
   const select = $('snapshot-interval');
   if (![...select.options].some((option) => Number(option.value) === settings.snapshotIntervalMs)) {
-    select.add(new Option(`${settings.snapshotIntervalMs / 1000} секунд`, String(settings.snapshotIntervalMs)));
+    const option = localizedElement('option', '', '{seconds} секунд', { seconds: settings.snapshotIntervalMs / 1000 });
+    option.value = String(settings.snapshotIntervalMs);
+    select.add(option);
   }
   select.value = String(settings.snapshotIntervalMs);
 }
@@ -887,14 +893,15 @@ function renderThreshold() {
   const preset = [...select.options].find(option => Number(option.value) === thresholdDraft);
   let custom = select.querySelector('option[value="custom"]');
   if (!preset && !custom) {
-    custom = new Option('Свой порог', 'custom');
+    custom = localizedElement('option', '', 'Свой порог');
+    custom.value = 'custom';
     custom.disabled = true;
     select.add(custom);
   }
   if (preset && custom) custom.remove();
   select.value = preset ? preset.value : 'custom';
   $('threshold-adjustment').value = thresholdToSlider(thresholdDraft);
-  $('threshold-adjustment').setAttribute('aria-valuetext', `Порог ${formatLevel(thresholdDraft)}`);
+  $('threshold-adjustment').setAttribute('aria-valuetext', t('Порог {threshold}', { threshold: formatLevel(thresholdDraft) }));
   $('threshold-value').textContent = formatLevel(thresholdDraft);
   renderSoundLevel();
 }
@@ -902,7 +909,7 @@ function renderThreshold() {
 function changeThreshold(threshold) {
   thresholdDraft = threshold;
   settingsDirty = true;
-  $('settings-feedback').textContent = 'Есть несохранённые изменения';
+  $('settings-feedback').textContent = t('Есть несохранённые изменения');
   renderThreshold();
 }
 
@@ -912,19 +919,35 @@ function renderSoundLevel() {
   $('sound-level-bar').style.width = `${levelPosition(soundLevel)}%`;
   $('sound-level-value').textContent = measuring ? formatLevel(soundLevel) : '—';
   $('sound-threshold-marker').style.left = `${levelPosition(appliedThreshold)}%`;
-  $('sound-threshold-marker').title = `Действующий порог: ${formatLevel(appliedThreshold)}`;
+  $('sound-threshold-marker').title = t('Действующий порог: {threshold}', { threshold: formatLevel(appliedThreshold) });
   $('sound-draft-marker').hidden = !draft;
   $('sound-draft-marker').style.left = `${levelPosition(thresholdDraft)}%`;
-  $('sound-draft-marker').title = `Несохранённый порог: ${formatLevel(thresholdDraft)}`;
+  $('sound-draft-marker').title = t('Несохранённый порог: {threshold}', { threshold: formatLevel(thresholdDraft) });
   $('level-container').classList.toggle('above-threshold', measuring && soundLevel >= appliedThreshold);
-  $('level-container').querySelector('.level-track').setAttribute('aria-label', `Уровень звука: ${measuring ? formatLevel(soundLevel) : 'микрофон выключен'}. Действующий порог: ${formatLevel(appliedThreshold)}.${draft ? ` Несохранённый порог: ${formatLevel(thresholdDraft)}.` : ''}`);
+  $('level-container').querySelector('.level-track').setAttribute('aria-label', t('Уровень звука: {level}. Действующий порог: {threshold}.', { level: measuring ? formatLevel(soundLevel) : t('микрофон выключен'), threshold: formatLevel(appliedThreshold) }) + (draft ? t(' Несохранённый порог: {threshold}.', { threshold: formatLevel(thresholdDraft) }) : ''));
   $('threshold-hint').textContent = draft
-    ? `Сплошная отметка — действующий порог ${formatLevel(appliedThreshold)}, пунктирная — новый ${formatLevel(thresholdDraft)}. Сохраните настройки, чтобы применить.`
-    : `Отметка — действующий порог ${formatLevel(appliedThreshold)}. Звук выше него вызывает срабатывание.`;
+    ? t('Сплошная отметка — действующий порог {threshold}, пунктирная — новый {draft}. Сохраните настройки, чтобы применить.', { threshold: formatLevel(appliedThreshold), draft: formatLevel(thresholdDraft) })
+    : t('Отметка — действующий порог {threshold}. Звук выше него вызывает срабатывание.', { threshold: formatLevel(appliedThreshold) });
 }
 
 function calibrationBusy() {
   return calibrationState.kind === 'starting' || calibrationState.kind === 'calibrating';
+}
+
+function renderCalibrationFeedback() {
+  const result = calibrationFeedbackState;
+  if (!result) return;
+  let message;
+  if (result.kind === 'complete') {
+    message = t('Фон измерен: {noiseFloor}. Предлагаемый порог: {threshold}. При необходимости подправьте его и сохраните настройки.', { noiseFloor: formatLevel(result.noiseFloor), threshold: formatLevel(result.threshold) });
+  } else if (result.kind === 'calibrating') {
+    message = t('Измеряем фон… Осталось {seconds} с. Новые шумовые события пока не создаются.', { seconds: Math.ceil(result.remainingMs / 1000) });
+  } else if (result.kind === 'starting') {
+    message = translateMessage(result.message) || t('Разрешите доступ к микрофону. Замер начнётся после подключения.');
+  } else {
+    message = translateMessage(result.message) || t('Калибровка отменена. Порог не изменён.');
+  }
+  if ($('calibration-feedback').textContent !== message) $('calibration-feedback').textContent = message;
 }
 
 function renderSoundControls() {
@@ -949,7 +972,11 @@ async function loadDevices() {
       // Keep direction choices available even when the browser hides cameras.
       select.querySelectorAll('option[data-device]').forEach(option => option.remove());
       devices.filter((device) => device.kind === kind && device.deviceId).forEach((device, index) => {
-        const option = new Option(device.label || `${label} ${index + 1}`, device.deviceId);
+        const option = new Option(device.label || `${t(label)} ${index + 1}`, device.deviceId);
+        if (!device.label) {
+          option.dataset.deviceLabel = label;
+          option.dataset.deviceIndex = String(index + 1);
+        }
         option.dataset.device = '';
         select.add(option);
       });
@@ -964,7 +991,7 @@ async function loadPairingQR() {
   const token = active.binding.viewerToken;
   $('qr-placeholder').hidden = false;
   $('pairing-qr').hidden = true;
-  $('qr-placeholder').textContent = token ? 'Готовим QR-код…' : 'Создайте новую ссылку. Прежние гостевые ссылки перестанут работать.';
+  $('qr-placeholder').textContent = token ? t('Готовим QR-код…') : t('Создайте новую ссылку. Прежние гостевые ссылки перестанут работать.');
   $('copy-link').disabled = !token;
   if (!token) return;
   try {
@@ -977,12 +1004,12 @@ async function loadPairingQR() {
     $('qr-placeholder').hidden = true;
   } catch (error) {
     if (current !== generation) return;
-    $('qr-placeholder').textContent = 'QR-код не загрузился. Можно скопировать ссылку ниже.';
+    $('qr-placeholder').textContent = t('QR-код не загрузился. Можно скопировать ссылку ниже.');
     if ([400, 403].includes(error.status) && active?.binding.account) {
       delete active.binding.viewerToken;
       saveBindings();
       $('copy-link').disabled = true;
-      $('qr-placeholder').textContent = 'Ключ просмотра изменился. Создайте новую ссылку: прежние ссылки перестанут работать.';
+      $('qr-placeholder').textContent = t('Ключ просмотра изменился. Создайте новую ссылку: прежние ссылки перестанут работать.');
     }
   }
 }
@@ -1018,6 +1045,13 @@ function textElement(tag, className, value) {
   return node;
 }
 
+function localizedElement(tag, className, key, params = {}) {
+  const node = textElement(tag, className, t(key, params));
+  node.dataset.i18n = key;
+  if (Object.keys(params).length) node.dataset.i18nParams = JSON.stringify(params);
+  return node;
+}
+
 function renderHistory() {
   const events = room.events || [];
   const visible = events.slice(0, historyLimit);
@@ -1027,7 +1061,7 @@ function renderHistory() {
   if (signature === historySignature) {
     [...$('event-history').children].forEach((card, index) => {
       const detail = card.querySelector('.event-last-noise');
-      const text = `Последний звук: ${fullDate(visible[index].lastNoiseAt)}`;
+      const text = t('Последний звук: {time}', { time: fullDate(visible[index].lastNoiseAt) });
       if (detail.textContent !== text) detail.textContent = text;
     });
     return;
@@ -1057,31 +1091,31 @@ function renderHistory() {
     if (event.hasPhoto) {
       const button = document.createElement('button');
       button.className = 'event-photo-button';
-      button.setAttribute('aria-label', `Открыть фото: ${fullDate(event.photoAt)}`);
+      button.setAttribute('aria-label', t('Открыть фото: {time}', { time: fullDate(event.photoAt) }));
       const image = document.createElement('img');
-      image.alt = `Домашний момент, ${shortDate(event.photoAt)}`;
+      image.alt = t('Домашний момент, {time}', { time: shortDate(event.photoAt) });
       image.hidden = true;
-      const loading = textElement('span', 'photo-loading', 'Загружаем момент…');
+      const loading = textElement('span', 'photo-loading', t('Загружаем момент…'));
       button.append(loading, image);
       card.append(button);
       button.addEventListener('click', () => void openPhoto(event));
       void fetchPhoto(event).then((url) => {
         if (current !== generation || epoch !== photoEpoch) return;
         if (url) { image.src = url; image.hidden = false; loading.hidden = true; }
-        else loading.textContent = 'Фото не загрузилось';
+        else loading.textContent = t('Фото не загрузилось');
       });
     }
     const info = document.createElement('div');
     info.className = 'event-info';
-    const title = textElement('h3', '', 'Шум дома');
+    const title = textElement('h3', '', t('Шум дома'));
     const date = textElement('time', 'event-date', shortDate(event.startedAt));
     date.dateTime = event.startedAt;
     date.title = fullDate(event.startedAt);
-    const detail = textElement('span', 'event-detail event-last-noise', `Последний звук: ${fullDate(event.lastNoiseAt)}`);
+    const detail = textElement('span', 'event-detail event-last-noise', t('Последний звук: {time}', { time: fullDate(event.lastNoiseAt) }));
     info.append(title, date, detail);
-    if (event.hasPhoto && event.photoAt) info.append(textElement('span', 'event-detail', `Фото: ${fullDate(event.photoAt)}`));
+    if (event.hasPhoto && event.photoAt) info.append(textElement('span', 'event-detail event-photo-time', t('Фото: {time}', { time: fullDate(event.photoAt) })));
     card.append(info);
-    if (!event.hasPhoto) card.append(textElement('div', 'event-no-photo', 'Событие без фотографии'));
+    if (!event.hasPhoto) card.append(textElement('div', 'event-no-photo', t('Событие без фотографии')));
     $('event-history').append(card);
   }
   latestPhoto = last || null;
@@ -1107,11 +1141,39 @@ async function openPhoto(event) {
   const key = photoKey(event);
   const url = await fetchPhoto(event);
   if (current !== generation || confirmingHistory || !room?.events?.some(item => item.hasPhoto && photoKey(item) === key)) return;
-  if (!url) { toast('Фото не загрузилось. Попробуйте ещё раз.'); return; }
+  if (!url) { toast(t('Фото не загрузилось. Попробуйте ещё раз.')); return; }
   $('dialog-photo').src = url;
   dialogPhotoKey = key;
-  $('dialog-photo-caption').textContent = `Шум дома · снимок ${fullDate(event.photoAt)}`;
+  $('dialog-photo-caption').textContent = t('Шум дома · снимок {time}', { time: fullDate(event.photoAt) });
   if (!$('photo-dialog').open) $('photo-dialog').showModal();
+}
+
+function renderHistoryLanguage() {
+  if (!room) return;
+  const events = new Map((room.events || []).map(event => [event.id, event]));
+  for (const card of $('event-history').children) {
+    const event = events.get(card.dataset.eventId);
+    if (!event) continue;
+    card.querySelector('h3').textContent = t('Шум дома');
+    const date = card.querySelector('.event-date');
+    date.textContent = shortDate(event.startedAt);
+    date.title = fullDate(event.startedAt);
+    card.querySelector('.event-last-noise').textContent = t('Последний звук: {time}', { time: fullDate(event.lastNoiseAt) });
+    const photoTime = card.querySelector('.event-photo-time');
+    if (photoTime) photoTime.textContent = t('Фото: {time}', { time: fullDate(event.photoAt) });
+    const photoButton = card.querySelector('.event-photo-button');
+    if (photoButton) {
+      photoButton.setAttribute('aria-label', t('Открыть фото: {time}', { time: fullDate(event.photoAt) }));
+      photoButton.querySelector('img').alt = t('Домашний момент, {time}', { time: shortDate(event.photoAt) });
+      const loading = photoButton.querySelector('.photo-loading');
+      loading.textContent = translateMessage(loading.textContent);
+    }
+    const noPhoto = card.querySelector('.event-no-photo');
+    if (noPhoto) noPhoto.textContent = t('Событие без фотографии');
+  }
+  if (latestPhoto) $('latest-photo-time').textContent = fullDate(latestPhoto.photoAt);
+  const dialogEvent = [...events.values()].find(event => photoKey(event) === dialogPhotoKey);
+  if (dialogEvent) $('dialog-photo-caption').textContent = t('Шум дома · снимок {time}', { time: fullDate(dialogEvent.photoAt) });
 }
 
 async function toggleCapture() {
@@ -1128,7 +1190,7 @@ async function toggleCapture() {
     if (isHost) {
       if (hostRunning) { await currentMonitor.stopHost(); if (generation === current) hostRunning = false; }
       else {
-        if (!window.isSecureContext) throw new Error('Камера доступна только по HTTPS или на localhost. Откройте BarkOdd по защищённому адресу.');
+        if (!window.isSecureContext) throw new Error(t('Камера доступна только по HTTPS или на localhost. Откройте BarkOdd по защищённому адресу.'));
         const videoFacingMode = $('video-device').selectedOptions[0]?.dataset.facingMode;
         appliedThreshold = room?.settings?.threshold ?? DEFAULT_NOISE_THRESHOLD;
         await currentMonitor.startHost({
@@ -1143,7 +1205,7 @@ async function toggleCapture() {
   } catch (error) {
     if (generation !== current) return;
     if (!isHost) viewerWatching = false;
-    showError(error.message || 'Не удалось включить камеру. Проверьте разрешения браузера.');
+    showError(error.message || t('Не удалось включить камеру. Проверьте разрешения браузера.'));
   } finally {
     if (generation === current) { mediaBusy = false; renderMedia(); }
   }
@@ -1165,7 +1227,7 @@ async function setViewerChannels(video, audio) {
     if (generation !== current) return;
     viewerWatching = viewerListening = false;
     await currentMonitor.stopViewer();
-    if (generation === current) showError(error.message || 'Не удалось включить трансляцию.');
+    if (generation === current) showError(error.message || t('Не удалось включить трансляцию.'));
   } finally {
     if (generation === current) { mediaBusy = false; renderMedia(); }
   }
@@ -1177,7 +1239,7 @@ async function copyLink() {
   try {
     if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('Clipboard unavailable');
     await navigator.clipboard.writeText(link);
-    toast('Ссылка скопирована. Откройте её на другом устройстве.');
+    toast(t('Ссылка скопирована. Откройте её на другом устройстве.'));
   } catch (_) {
     const input = document.createElement('textarea');
     input.value = link;
@@ -1188,8 +1250,8 @@ async function copyLink() {
     let copied = false;
     try { copied = document.execCommand('copy'); } catch (_) { /* Fallback below. */ }
     input.remove();
-    if (copied) toast('Ссылка скопирована.');
-    else window.prompt('Скопируйте ссылку на комнату:', link);
+    if (copied) toast(t('Ссылка скопирована.'));
+    else window.prompt(t('Скопируйте ссылку на комнату:'), link);
   }
 }
 
@@ -1207,7 +1269,7 @@ $('forget-binding').addEventListener('click', async () => {
   try { localStorage.removeItem(GUEST_STORAGE_KEY); } catch (_) {}
   saveBindings();
   await showWelcome();
-  toast('Привязки удалены из этого браузера. Ссылки на комнаты продолжают действовать.');
+  toast(t('Привязки удалены из этого браузера. Ссылки на комнаты продолжают действовать.'));
 });
 $('host-form').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -1215,7 +1277,7 @@ $('host-form').addEventListener('submit', async (event) => {
   const actor = authActor();
   const navigation = navigationSequence;
   const name = $('room-name').value.trim();
-  if (!name) { showError('Дайте комнате название.', true); return; }
+  if (!name) { showError(t('Дайте комнате название.'), true); return; }
   const button = event.currentTarget.querySelector('button');
   button.disabled = true;
   showError('', true);
@@ -1237,12 +1299,12 @@ $('approval-form').addEventListener('submit', async event => {
   const current = generation;
   try {
     await request(`api/rooms/${encodeURIComponent(active.binding.id)}/approval`, { method: 'POST', body: {} });
-    if (current === generation) { await pollRoom(current); toast('Комната подтверждена владельцем.'); }
+    if (current === generation) { await pollRoom(current); toast(t('Комната подтверждена владельцем.')); }
   } catch (error) { if (current === generation) showError(error.message); }
 });
 $('delete-room').addEventListener('click', async () => {
   if (active?.role !== 'host' || !active.binding.account || identityBusy) return;
-  if (!window.confirm('Удалить камеру, её историю и фотографии? Гостевые ссылки этой камеры перестанут работать.')) return;
+  if (!window.confirm(t('Удалить камеру, её историю и фотографии? Гостевые ссылки этой камеры перестанут работать.'))) return;
   const current = generation;
   const actor = authActor();
   const binding = active.binding;
@@ -1256,7 +1318,7 @@ $('delete-room').addEventListener('click', async () => {
     if (!sameActor(actor)) return;
     forgetCameraBindings([binding]);
     if (current === generation) {
-      toast(result?.cleanupPending ? 'Камера удалена. Сервер завершит очистку фотографий.' : 'Камера, её история и фотографии удалены.');
+      toast(result?.cleanupPending ? t('Камера удалена. Сервер завершит очистку фотографий.') : t('Камера, её история и фотографии удалены.'));
       await showWelcome();
     }
   } catch (error) { if (current === generation) showError(error.message); }
@@ -1291,9 +1353,10 @@ $('calibrate-noise').addEventListener('click', () => {
 $('cancel-calibration').addEventListener('click', () => monitor?.cancelCalibration());
 $('audio-device').addEventListener('change', () => {
   monitor?.cancelCalibration();
-  $('calibration-feedback').textContent = 'Микрофон изменён. Повторите калибровку для нового микрофона.';
+  calibrationFeedbackState = null;
+  $('calibration-feedback').textContent = t('Микрофон изменён. Повторите калибровку для нового микрофона.');
 });
-$('snapshot-interval').addEventListener('change', () => { settingsDirty = true; $('settings-feedback').textContent = 'Есть несохранённые изменения'; });
+$('snapshot-interval').addEventListener('change', () => { settingsDirty = true; $('settings-feedback').textContent = t('Есть несохранённые изменения'); });
 $('settings-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!api || !active || active.role !== 'host' || settingsSaving || calibrationBusy()) return;
@@ -1313,8 +1376,8 @@ $('settings-form').addEventListener('submit', async (event) => {
     appliedThreshold = settings.threshold;
     settingsDirty = false;
     fillSettings(settings);
-    $('settings-feedback').textContent = 'Настройки сохранены';
-    toast('Настройки наблюдения сохранены');
+    $('settings-feedback').textContent = t('Настройки сохранены');
+    toast(t('Настройки наблюдения сохранены'));
     void pollRoom(current);
   } catch (error) { if (current === generation) showError(error.message); }
   finally { if (current === generation) { settingsSaving = false; renderSoundControls(); } }
@@ -1322,7 +1385,7 @@ $('settings-form').addEventListener('submit', async (event) => {
 $('copy-link').addEventListener('click', () => void copyLink());
 $('regenerate-key').addEventListener('click', async () => {
   if (!api || !active || active.role !== 'host') return;
-  if (!window.confirm('Создать новую гостевую ссылку? Все прежние ссылки и QR-коды перестанут работать.')) return;
+  if (!window.confirm(t('Создать новую гостевую ссылку? Все прежние ссылки и QR-коды перестанут работать.'))) return;
   const current = generation;
   $('regenerate-key').disabled = true;
   try {
@@ -1332,7 +1395,7 @@ $('regenerate-key').addEventListener('click', async () => {
     bindings.host = active.binding;
     saveBindings();
     await loadPairingQR();
-    toast('Новая ссылка готова. Старая больше не действует.');
+    toast(t('Новая ссылка готова. Старая больше не действует.'));
   } catch (error) { if (current === generation) showError(error.message); }
   finally { $('regenerate-key').disabled = false; }
 });
@@ -1353,7 +1416,7 @@ $('code-form').addEventListener('submit', event => { event.preventDefault(); voi
 $('login-form').addEventListener('submit', event => { event.preventDefault(); void authenticate(event.currentTarget, 'api/auth/login', { username: $('login-username').value, password: $('login-password').value }); });
 $('register-form').addEventListener('submit', event => {
   event.preventDefault();
-  if ($('register-password').value !== $('register-confirm').value) { showError('Пароли не совпадают.', true); return; }
+  if ($('register-password').value !== $('register-confirm').value) { showError(t('Пароли не совпадают.'), true); return; }
   void authenticate(event.currentTarget, 'api/auth/register', { username: $('register-username').value, password: $('register-password').value });
 });
 $('refresh-rooms').addEventListener('click', () => void loadRooms());
@@ -1366,7 +1429,7 @@ $('logout').addEventListener('click', async () => {
   try {
     await request('api/auth/logout', { method: 'POST', body: {}, actorID: actor.id });
     await teardown;
-    if (sameActor(actor)) await loseAccount('Вы вышли из аккаунта.', actor);
+    if (sameActor(actor)) await loseAccount(t('Вы вышли из аккаунта.'), actor);
   } catch (error) { if (sameActor(actor)) await showWelcome(error.message); }
   finally { setIdentityBusy(false); }
 });
@@ -1384,7 +1447,7 @@ $('password-form').addEventListener('submit', async event => {
   setIdentityBusy(true);
   try {
     await request('api/auth/password', { method: 'POST', body, actorID: actor.id });
-    if (sameActor(actor)) await loseAccount('Пароль изменён. Войдите с новым паролем.', actor);
+    if (sameActor(actor)) await loseAccount(t('Пароль изменён. Войдите с новым паролем.'), actor);
   } catch (error) { if (sameActor(actor)) showError(error.message, true); }
   finally { setIdentityBusy(false); }
 });
@@ -1397,8 +1460,8 @@ async function loadUsers() {
   $('users-list').replaceChildren();
   for (const user of data.users.filter(user => user.role === 'user')) {
     const card = textElement('article', 'user-card', '');
-    card.append(textElement('h3', '', user.username), textElement('p', 'field-hint', user.disabled ? 'Учётная запись заблокирована' : 'Учётная запись активна'));
-    const toggle = textElement('button', 'button button-secondary', user.disabled ? 'Разблокировать' : 'Заблокировать');
+    card.append(textElement('h3', '', user.username), localizedElement('p', 'field-hint', user.disabled ? 'Учётная запись заблокирована' : 'Учётная запись активна'));
+    const toggle = localizedElement('button', 'button button-secondary', user.disabled ? 'Разблокировать' : 'Заблокировать');
     toggle.type = 'button';
     toggle.addEventListener('click', async () => {
       if (!current()) return;
@@ -1496,5 +1559,43 @@ function placeLatestPhoto() {
 }
 mobileLayout.addEventListener('change', placeLatestPhoto);
 placeLatestPhoto();
+
+function renderLanguageButtons() {
+  for (const language of ['en', 'ru']) $('language-' + language).setAttribute('aria-pressed', String(getLanguage() === language));
+}
+
+function updateLanguage() {
+  // Update only known application messages. Form values, account and room
+  // names, selected devices, and active media streams stay in place.
+  const notices = [...document.querySelectorAll('#welcome-alert, #dashboard-alert, #toast, #settings-feedback, #calibration-feedback, #qr-placeholder, .group-feedback')]
+    .map(node => [node, node.textContent]);
+  applyTranslations();
+  for (const [node, message] of notices) node.textContent = translateMessage(message);
+  audioState = { ...audioState, message: translateMessage(audioState.message) };
+  mediaMessage = translateMessage(mediaMessage);
+  calibrationState = { ...calibrationState, message: translateMessage(calibrationState.message) };
+  renderAccountText();
+  renderLanguageButtons();
+  for (const option of document.querySelectorAll('option[data-device-label]')) {
+    option.textContent = `${t(option.dataset.deviceLabel)} ${option.dataset.deviceIndex}`;
+  }
+  document.title = room ? `${room.name} · BarkOdd` : t('BarkOdd — рядом, даже издалека');
+  if (active) {
+    $('role-label').textContent = active.binding.account ? t('Мои комнаты') : t('Сменить устройство');
+    $('room-title').textContent = room ? room.name : t('Подключаемся…');
+    $('video-heading-text').textContent = active.role === 'host' ? t('Камера питомца') : t('Камера дома');
+    renderStatus();
+    if (room) renderTimes();
+    renderThreshold();
+    renderCalibrationFeedback();
+    renderMedia();
+    renderHistoryLanguage();
+  }
+}
+
+for (const language of ['en', 'ru']) $('language-' + language).addEventListener('click', () => setLanguage(language));
+window.addEventListener('languagechange', updateLanguage);
+applyTranslations();
+renderLanguageButtons();
 
 void initialize();

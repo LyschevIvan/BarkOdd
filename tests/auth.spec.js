@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, russianContext } from './russian-fixture.js';
 
 const mode = process.env.BARKODD_AUTH_MODE || 'admin_code';
 const code = process.env.BARKODD_OWNER_KEY || 'test-owner-key-0123456789abcdef0123456789';
@@ -48,7 +48,7 @@ test(`${mode}: account access, session room binding and guest link`, async ({ pa
   await expect(card).toHaveCount(1);
   await card.getByRole('button', { name: 'Просмотр', exact: true }).click();
   await expect(page.locator('#host-settings')).toBeHidden();
-  const context = await browser.newContext();
+  const context = await russianContext(browser);
   const guest = await context.newPage();
   await guest.goto(endpoint(baseURL, `?role=viewer#room=${binding.id}&key=${binding.viewerToken}`));
   await expect(guest.locator('#room-title')).toHaveText(name);
@@ -60,7 +60,7 @@ test('new browser recovers rooms through its session without rotating guest link
   await admin(page);
   const name = unique('Recover home');
   const binding = await create(page, name);
-  const context = await browser.newContext();
+  const context = await russianContext(browser);
   const fresh = await context.newPage();
   await admin(fresh);
   const card = fresh.locator('.owned-room').filter({ hasText: name });
@@ -84,7 +84,7 @@ test('self registration isolates rooms, password change signs out, administrator
   await register(page, first);
   const binding = await create(page, unique('Private home'));
   await page.locator('#switch-role').click();
-  const secondContext = await browser.newContext();
+  const secondContext = await russianContext(browser);
   const second = await secondContext.newPage();
   await register(second, unique('bob'));
   await expect(second.locator('.owned-room')).toHaveCount(0);
@@ -102,7 +102,7 @@ test('self registration isolates rooms, password change signs out, administrator
   await page.locator('#capture-button').click();
   await expect.poll(() => page.locator('#camera-video').evaluate(v => !!v.srcObject)).toBe(true);
   await page.evaluate(() => { window.__blockedTracks = document.querySelector('#camera-video').srcObject.getTracks(); });
-  const adminContext = await browser.newContext();
+  const adminContext = await russianContext(browser);
   const manager = await adminContext.newPage();
   await admin(manager);
   await expect(manager.locator('.owned-room').filter({ hasText: 'Private home' })).toHaveCount(0);
@@ -180,7 +180,7 @@ test('migrates saved guest links and owner QR keys without keeping legacy host c
   await admin(page);
   const name = unique('Legacy home');
   const binding = await create(page, name);
-  const guestContext = await browser.newContext();
+  const guestContext = await russianContext(browser);
   await guestContext.addInitScript(binding => {
     if (!localStorage.getItem('migration-seeded')) {
       localStorage.setItem('migration-seeded', 'true');
@@ -192,7 +192,7 @@ test('migrates saved guest links and owner QR keys without keeping legacy host c
   await expect(guest.locator('#room-title')).toHaveText(name);
   await expect(guest.locator('#host-settings')).toBeHidden();
   expect(await guest.evaluate(() => localStorage.getItem('barkodd.binding.v1'))).toBeNull();
-  const ownerContext = await browser.newContext();
+  const ownerContext = await russianContext(browser);
   await ownerContext.addInitScript(binding => {
     if (!localStorage.getItem('migration-seeded')) {
       localStorage.setItem('migration-seeded', 'true');
@@ -297,7 +297,7 @@ test('failed v2 migration writes preserve a recoverable viewer key and discard o
   await admin(page);
   const name = unique('Storage recovery home');
   const binding = await create(page, name);
-  const context = await browser.newContext();
+  const context = await russianContext(browser);
   await context.addInitScript(binding => {
     const native = Storage.prototype.setItem;
     if (!localStorage.getItem('migration-seeded')) {

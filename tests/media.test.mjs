@@ -319,7 +319,7 @@ await test('raising sensitivity detects quiet input live and preserves the measu
 await test('standalone calibration requests only the selected microphone and never starts observation', { audioLevel: 0.001 }, async env => {
   assert.equal(env.monitor.startCalibration({ audioDeviceId: 'selected-microphone' }), true);
   assert.equal(env.calibrations[0].kind, 'starting');
-  assert.match(env.calibrations[0].message, /микрофон/i);
+  assert.match(env.calibrations[0].message, /microphone/i);
   assert.equal(env.monitor.startCalibration(), false, 'a repeated click must not open another microphone');
   assert.deepEqual(env.mediaConstraints, [{ video: false, audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, deviceId: { exact: 'selected-microphone' } } }]);
   await env.advance(4950);
@@ -374,8 +374,8 @@ await test('standalone calibration denial reports only microphone permission and
   await env.settle();
   const result = env.calibrations[env.calibrations.length - 1];
   assert.equal(result.kind, 'error');
-  assert.match(result.message, /микрофон/i);
-  assert.doesNotMatch(result.message, /камер/i);
+  assert.match(result.message, /microphone/i);
+  assert.doesNotMatch(result.message, /camera/i);
   assert.equal(env.audioContexts[0].state, 'closed');
   assert.deepEqual(env.posts, []);
   assert.equal(env.timerCount(), 0);
@@ -572,7 +572,7 @@ await test('a live muted microphone reports monitoring=false and recovers on unm
   assert.ok(heartbeats().length > 0, 'host must send a heartbeat');
   assert.equal(lastHeartbeat().monitoring, false, 'a live but muted microphone is not monitoring');
   await env.advance(5100);
-  assert.match(env.statuses[env.statuses.length - 1].message, /браузер.*микрофон|микрофон.*браузер/i, 'status must identify the browser-muted input');
+  assert.match(env.statuses[env.statuses.length - 1].message, /browser.*microphone|microphone.*browser/i, 'status must identify the browser-muted input');
   assert.notEqual(env.statuses[env.statuses.length - 1].kind, 'monitoring', 'heartbeats must not replace the microphone warning');
   env.setMuted(false);
   await env.advance(5100);
@@ -614,7 +614,7 @@ await test('disabled microphone stops noise and monitoring, then recovers when e
   await env.monitor.startHost();
   await env.settle();
   await assertUnavailableThenRecovered(env, () => {
-    assert.match(env.statuses[env.statuses.length - 1].message, /выключен|отключен/i, 'status must identify the disabled input');
+    assert.match(env.statuses[env.statuses.length - 1].message, /off|disabled/i, 'status must identify the disabled input');
     env.setEnabled(true);
   });
 });
@@ -626,7 +626,7 @@ await test('suspended audio rejects retained samples and recovers when resumed',
   env.levels.length = 0;
   env.posts.length = 0;
   await assertUnavailableThenRecovered(env, () => {
-    assert.match(env.statuses[env.statuses.length - 1].message, /приостановил|приостановлен/i, 'status must identify suspended audio');
+    assert.match(env.statuses[env.statuses.length - 1].message, /suspended|paused/i, 'status must identify suspended audio');
     env.setAudioState('running');
   });
 });
@@ -656,7 +656,7 @@ await test('a pending audio resume exposes the suspended input and leaves host c
   await env.settle();
   assert.equal(finished, true, 'startup must not wait indefinitely for browser audio');
   assert.equal(env.statuses[env.statuses.length - 1].kind, 'error');
-  assert.match(env.statuses[env.statuses.length - 1].message, /приостановил|приостановлен/i);
+  assert.match(env.statuses[env.statuses.length - 1].message, /suspended|paused/i);
   assert.equal(env.posts.find(post => post.path === '/heartbeat')?.body.monitoring, false);
   env.setAudioState('running');
   await env.advance(5000);
@@ -672,7 +672,7 @@ await test('denied device permission closes the host audio context while resume 
   });
   const starting = env.monitor.startHost();
   env.denyMedia();
-  await assert.rejects(starting, /доступ к камере и микрофону/i);
+  await assert.rejects(starting, /access to (the )?camera and microphone/i);
   assert.equal(env.errors.length, 1);
   env.errors.length = 0;
   assert.equal(context?.state, 'closed', 'permission denial must release audio resources opened on click');
@@ -1398,7 +1398,7 @@ await test('revoked viewer access clears frames and permanently stops automatic 
   assert.equal(env.frames[env.frames.length - 1], null);
   assert.equal(env.sockets.length, 1);
   assert.equal(env.statuses[env.statuses.length - 1].kind, 'error');
-  assert.match(env.statuses[env.statuses.length - 1].message, /доступ|ссылк|ключ/i);
+  assert.match(env.statuses[env.statuses.length - 1].message, /access|link|key/i);
   assert.equal(env.errors.length, 1);
   env.errors.length = 0;
 });
@@ -1567,7 +1567,7 @@ await test('changing selected channels replaces the old socket instead of leavin
 });
 
 await test('unknown viewer mode is rejected before opening transport', {}, async env => {
-  await assert.rejects(env.monitor.startViewer({ mode: 'record' }), /режим/i);
+  await assert.rejects(env.monitor.startViewer({ mode: 'record' }), /mode/i);
   assert.equal(env.sockets.length, 0);
 });
 
@@ -1700,7 +1700,7 @@ await test('a timed-out event upload cannot stop local captures or lose their la
   await env.advance(12500);
   assert.deepEqual(captures, [150, 10150]);
   assert.equal(env.errors.length, 1);
-  assert.match(env.errors.pop().message, /Сервер не отвечает/);
+  assert.match(env.errors.pop().message, /Server is not responding/);
   finish(); await env.settle();
   env.onEvent(body => Promise.resolve({ ...eventResult(body), photoStatus: body.photo ? 'accepted' : 'none' }));
   await env.advance(8000);

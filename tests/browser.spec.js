@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, russianContext } from './russian-fixture.js';
 
 const authMode = process.env.BARKODD_AUTH_MODE || 'admin_code';
 async function loginOwner(page) {
@@ -98,7 +98,7 @@ test('history clear keeps monitoring, new starts reset history, and the latest p
   await page.setViewportSize({ width: 1440, height: 1000 });
   await expect.poll(() => page.evaluate(() => document.querySelector('#latest-photo-panel').getBoundingClientRect().x > document.querySelector('.video-card').getBoundingClientRect().x)).toBe(true);
 
-  const guestContext = await browser.newContext();
+  const guestContext = await russianContext(browser);
   const guest = await guestContext.newPage();
   try {
     await guest.goto(new URL(`?role=viewer#room=${binding.id}&key=${binding.viewerToken}`, baseURL).href);
@@ -174,7 +174,7 @@ test('opening a photo survives a history update while the photo is loading', asy
     return canvas.toDataURL('image/jpeg');
   });
   expect((await page.request.post(roomURL(baseURL, binding.id, '/events'), { headers, data: { sessionId, episodeId: 'photo', photo, level: 0.3 } })).status()).toBe(200);
-  const context = await browser.newContext();
+  const context = await russianContext(browser);
   let releasePhoto;
   const photoReady = new Promise(resolve => { releasePhoto = resolve; });
   try {
@@ -324,7 +324,7 @@ test(`${transport}: on-demand video, photos, pause, reconnect and revocation`, a
   await expect.poll(() => page.evaluate(() => window.__viewerCount)).toBe(0);
   expect(await page.evaluate(() => window.__sentFrames)).toBe(0);
 
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  const context = await russianContext(browser, { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   const viewer = await context.newPage();
   viewer.on('pageerror', error => errors.push(error.message));
   await instrument(viewer);

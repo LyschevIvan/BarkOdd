@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, russianContext } from './russian-fixture.js';
 
 const transport = process.env.BARKODD_TRANSPORT || 'websocket';
 const authMode = process.env.BARKODD_AUTH_MODE || 'admin_code';
@@ -140,7 +140,7 @@ async function setup(browser, page, baseURL) {
   const binding = await page.evaluate(() => JSON.parse(localStorage.getItem('barkodd.account.v2.' + document.querySelector('#account-tools').dataset.userId)).host);
   await page.locator('#capture-button').click();
   await expect(page.locator('#camera-video')).toBeVisible();
-  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const context = await russianContext(browser, { viewport: { width: 390, height: 844 } });
   const viewer = await context.newPage();
   await instrument(viewer);
   await viewer.goto(new URL(`?role=viewer#room=${binding.id}&key=${binding.viewerToken}`, baseURL).href);

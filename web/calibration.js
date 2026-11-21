@@ -1,3 +1,5 @@
+import { t, getLocale } from './i18n.js';
+
 export const CALIBRATION_DURATION_MS = 5000;
 const MIN_THRESHOLD = 0.0005;
 const MAX_THRESHOLD = 0.5;
@@ -5,8 +7,18 @@ const MIN_SAMPLES = 75;
 const MAX_SAMPLE_GAP_MS = 1000;
 const MAX_STORED_SAMPLES = 4096;
 const THRESHOLD_RATIO = MAX_THRESHOLD / MIN_THRESHOLD;
-const precisePercent = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 3 });
-const regularPercent = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 });
+const percentFormats = new Map();
+
+function percentFormatters() {
+  const locale = getLocale();
+  if (!percentFormats.has(locale)) {
+    percentFormats.set(locale, {
+      precise: new Intl.NumberFormat(locale, { maximumFractionDigits: 3 }),
+      regular: new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }),
+    });
+  }
+  return percentFormats.get(locale);
+}
 
 function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
@@ -30,8 +42,9 @@ export function levelPosition(level) {
 export function formatLevel(level) {
   if (!Number.isFinite(level) || level < 0 || level > 1) return '—';
   const percent = level * 100;
-  if (percent > 0 && percent < 0.001) return '<0,001%';
-  return `${(percent < 1 ? precisePercent : regularPercent).format(percent)}%`;
+  const { precise, regular } = percentFormatters();
+  if (percent > 0 && percent < 0.001) return `<${precise.format(0.001)}%`;
+  return `${(percent < 1 ? precise : regular).format(percent)}%`;
 }
 
 function calibrationError(message) {
@@ -47,20 +60,20 @@ export class NoiseCalibration {
     this.lastSampleAt = null;
     this.result = Number.isFinite(startedAt) && startedAt >= 0
       ? null
-      : calibrationError('Не удалось определить время начала калибровки. Повторите замер.');
+      : calibrationError(t('Не удалось определить время начала калибровки. Повторите замер.'));
   }
 
   add(level, now) {
     if (this.result) return this.result;
     if (!Number.isFinite(level) || level < 0 || level > 1) {
-      return this.result = calibrationError('Микрофон передал некорректный уровень звука. Проверьте его и повторите замер.');
+      return this.result = calibrationError(t('Микрофон передал некорректный уровень звука. Проверьте его и повторите замер.'));
     }
     if (!Number.isFinite(now) || now < this.startedAt || (this.lastSampleAt !== null && now <= this.lastSampleAt)) {
-      return this.result = calibrationError('Время замера изменилось. Повторите калибровку.');
+      return this.result = calibrationError(t('Время замера изменилось. Повторите калибровку.'));
     }
     const previousAt = this.lastSampleAt === null ? this.startedAt : this.lastSampleAt;
     if (now - previousAt > MAX_SAMPLE_GAP_MS) {
-      return this.result = calibrationError('Замер звука прервался. Оставьте вкладку открытой и повторите калибровку.');
+      return this.result = calibrationError(t('Замер звука прервался. Оставьте вкладку открытой и повторите калибровку.'));
     }
     this.lastSampleAt = now;
     const sampleIndex = this.sampleCount++;
@@ -78,15 +91,15 @@ export class NoiseCalibration {
       return { kind: 'calibrating', remainingMs: CALIBRATION_DURATION_MS - elapsed, progress: elapsed / CALIBRATION_DURATION_MS };
     }
     if (this.sampleCount < MIN_SAMPLES) {
-      return this.result = calibrationError('Недостаточно замеров звука. Оставьте вкладку открытой и повторите калибровку.');
+      return this.result = calibrationError(t('Недостаточно замеров звука. Оставьте вкладку открытой и повторите калибровку.'));
     }
     const sorted = [...this.samples].sort((a, b) => a - b);
     const noiseFloor = sorted[Math.ceil(sorted.length * 0.9) - 1];
     if (noiseFloor === 0) {
-      return this.result = calibrationError('Микрофон передаёт тишину. Проверьте микрофон и повторите калибровку при обычном фоне.');
+      return this.result = calibrationError(t('Микрофон передаёт тишину. Проверьте микрофон и повторите калибровку при обычном фоне.'));
     }
     if (noiseFloor * 2 > MAX_THRESHOLD) {
-      return this.result = calibrationError('Фон слишком громкий для надёжного порога. Уменьшите фоновый шум и повторите замер.');
+      return this.result = calibrationError(t('Фон слишком громкий для надёжного порога. Уменьшите фоновый шум и повторите замер.'));
     }
     return this.result = { kind: 'complete', noiseFloor, threshold: Math.max(MIN_THRESHOLD, noiseFloor * 2) };
   }

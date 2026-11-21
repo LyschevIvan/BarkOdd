@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './russian-fixture.js';
 
 async function syntheticMicrophone(page, amplitude = 0.2) {
   await page.addInitScript(level => {

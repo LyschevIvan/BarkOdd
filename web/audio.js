@@ -1,3 +1,5 @@
+import { t } from './i18n.js';
+
 export const AUDIO_SAMPLE_RATE = 16000;
 export const AUDIO_SAMPLES = 1600;
 export const AUDIO_PACKET_BYTES = 8 + AUDIO_SAMPLES * 2;
@@ -33,7 +35,7 @@ export function decodeAudioPacket(packet) {
 // feeding the local microphone back into the host's speakers.
 export async function createAudioCapture({ context, source, onPacket, onError } = {}) {
   if (!context?.audioWorklet?.addModule || !globalThis.AudioWorkletNode) {
-    throw new Error('Этот браузер не поддерживает передачу звука через AudioWorklet.');
+    throw new Error(t('Этот браузер не поддерживает передачу звука через AudioWorklet.'));
   }
   await context.audioWorklet.addModule(new URL('./audio-worklet.js', import.meta.url));
   const node = new globalThis.AudioWorkletNode(context, 'barkodd-pcm-capture', {
@@ -65,7 +67,7 @@ export async function createAudioCapture({ context, source, onPacket, onError } 
   node.onprocessorerror = () => {
     if (closed) return;
     close();
-    onError?.(new Error('Не удалось обработать звук для трансляции. Перезапустите наблюдение.'));
+    onError?.(new Error(t('Не удалось обработать звук для трансляции. Перезапустите наблюдение.')));
   };
   try { source.connect(node); node.connect(context.destination); }
   catch (error) { close(); throw error; }
@@ -122,8 +124,8 @@ export function createAudioPlayer({ onStatus } = {}) {
     lastStatus = key;
     onStatus?.({ kind, message });
   };
-  const blocked = () => status('blocked', 'Браузер приостановил звук. Нажмите «Воспроизвести звук» для повторного запуска.');
-  const waiting = () => status('waiting', 'Ждём звук от устройства питомца…');
+  const blocked = () => status('blocked', t('Браузер приостановил звук. Нажмите «Воспроизвести звук» для повторного запуска.'));
+  const waiting = () => status('waiting', t('Ждём звук от устройства питомца…'));
   const stopNode = node => {
     node.onended = null;
     try { node.stop(); } catch { /* Already ended or context was closed. */ }
@@ -168,7 +170,7 @@ export function createAudioPlayer({ onStatus } = {}) {
   };
   try {
     const Audio = globalThis.AudioContext || globalThis.webkitAudioContext;
-    if (!Audio) throw new Error('Этот браузер не поддерживает воспроизведение звука.');
+    if (!Audio) throw new Error(t('Этот браузер не поддерживает воспроизведение звука.'));
     // Construct immediately, before any await, to retain the click's activation.
     releaseAudioSession = acquirePlaybackSession();
     context = new Audio();
@@ -176,7 +178,7 @@ export function createAudioPlayer({ onStatus } = {}) {
       if (closed) return;
       if (context.state === 'closed') {
         reset(); releasePlayback();
-        status('error', 'Воспроизведение звука остановлено браузером.');
+        status('error', t('Воспроизведение звука остановлено браузером.'));
       }
       else if (streamSetupFailed) return;
       else if (context.state === 'running') { if (!streamElement || streamPlaying) waiting(); }
@@ -244,7 +246,7 @@ export function createAudioPlayer({ onStatus } = {}) {
         lastSequence = decoded.sequence;
         return true;
       } catch (error) {
-        clearPCM(); status('error', 'Не удалось воспроизвести полученный звук.'); return false;
+        clearPCM(); status('error', t('Не удалось воспроизвести полученный звук.')); return false;
       }
     },
     setStream(stream) {
@@ -267,7 +269,7 @@ export function createAudioPlayer({ onStatus } = {}) {
       } catch (error) {
         disconnectStream();
         streamSetupFailed = true;
-        status('error', 'Не удалось воспроизвести звук трансляции.');
+        status('error', t('Не удалось воспроизвести звук трансляции.'));
       }
     },
     reset,
