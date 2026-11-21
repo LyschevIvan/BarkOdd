@@ -1,5 +1,5 @@
-# Standalone deployment alongside the existing Caddy container on Mac mini.
-# Run from the project root: docker compose -f deploy/compose.macmini.example.yaml --env-file .env up -d --build
+# Template for an installation behind an existing Caddy proxy.
+# For host-specific changes, copy to deploy/compose.macmini.yaml.
 name: barkodd
 services:
   app:

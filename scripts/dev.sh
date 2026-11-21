@@ -123,8 +123,9 @@ docker_command() {
       ;;
     macmini)
       [[ -n ${PUBLIC_URL:-} ]] || die "задайте PUBLIC_URL в $ENV_FILE для DEPLOY=macmini."
-      # This file's build context is '..', relative to its deploy/ directory.
-      args+=(-f "$root/deploy/compose.macmini.example.yaml")
+      local compose_file="$root/deploy/compose.macmini.yaml"
+      if [[ ! -f "$compose_file" ]]; then compose_file="$root/deploy/compose.macmini.example.yaml"; fi
+      args+=(-f "$compose_file")
       ;;
   esac
   case "$action" in

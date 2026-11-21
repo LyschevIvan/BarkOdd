@@ -2,6 +2,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/barkodd-launch.XXXXXX")
+tmp=$(cd "$tmp" && pwd)
 trap 'rm -rf "$tmp"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 unset AUTH_MODE ADMIN_CODE ROOM_CREATION_KEY PUBLIC_URL MEDIA_TRANSPORT TURN_PASSWORD DATA_DIR ADDR PORT APP_HOST DEPLOY || true
@@ -51,6 +52,14 @@ PUBLIC_URL=http://localhost:9090 ENV_FILE="$tmp/literal.env" bash "$root/scripts
 [[ $(cat "$CAPTURE.public") == http://localhost:9090 ]] || fail 'explicit PUBLIC_URL override lost'
 TURN_PASSWORD='environment $DOLLAR' ENV_FILE="$tmp/literal.env" make -s -C "$root" docker-config >/dev/null
 [[ $(cat "$CAPTURE.password") == 'environment $DOLLAR' ]] || fail 'Make changed a literal environment value'
+mkdir -p "$tmp/project/scripts" "$tmp/project/deploy"
+cp "$root/scripts/dev.sh" "$tmp/project/scripts/"
+cp "$root/deploy/compose.macmini.example.yaml" "$tmp/project/deploy/"
+DEPLOY=macmini ENV_FILE="$tmp/literal.env" bash "$tmp/project/scripts/dev.sh" docker-config >/dev/null
+grep -Fqx "$tmp/project/deploy/compose.macmini.example.yaml" "$CAPTURE.args" || fail 'macmini template not selected'
+touch "$tmp/project/deploy/compose.macmini.yaml"
+DEPLOY=macmini ENV_FILE="$tmp/literal.env" bash "$tmp/project/scripts/dev.sh" docker-config >/dev/null
+grep -Fqx "$tmp/project/deploy/compose.macmini.yaml" "$CAPTURE.args" || fail 'private macmini configuration not selected'
 printf 'AUTH_MODE=none\nthis is invalid\n' > "$tmp/bad.env"
 if ENV_FILE="$tmp/bad.env" bash "$root/scripts/dev.sh" docker-config >"$tmp/out" 2>&1; then fail 'malformed dotenv accepted'; fi
 printf 'AUTH_MODE=none\nPATH=/malicious\n' > "$tmp/bad.env"

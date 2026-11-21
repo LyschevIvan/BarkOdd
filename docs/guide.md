@@ -201,31 +201,11 @@ docker compose logs --tail=50 app https
 
 ## Размещение за существующим Caddy на Mac mini
 
-В каталоге проекта заполните `.env`. Подставьте свой домен и сгенерируйте код доступа. Для установки в подпути укажите полный `PUBLIC_URL` с завершающим `/`.
+Если Caddy уже обслуживает домен, BarkOdd можно разместить под путём `/barkodd/`. Укажите полный адрес в `PUBLIC_URL`, например `https://camera.example.com/barkodd/`. Caddy должен снимать префикс `/barkodd/` и пропускать WebSocket-соединения. [Настройка сети, маршрута и запуск через Make](running.md#существующий-caddy--mac-mini).
 
-```dotenv
-PUBLIC_URL=https://dog.example.com/barkodd/
-AUTH_MODE=admin_code
-ADMIN_CODE=<случайный-код-администратора>
-```
+Для WebRTC с отдельным coturn укажите в приватном файле окружения `TURN_URLS` и тот же `TURN_SECRET`, что и `static-auth-secret` на сервере TURN. При размещении за NAT пробросьте порт прослушивания TURN и настроенный диапазон relay-портов. Для каждого relay-порта внешний и внутренний номера должны совпадать. Укажите в `external-ip` соответствие публичного и внутреннего адресов вашей установки. [Документация coturn](https://github.com/coturn/coturn/blob/master/man/man1/turnserver.1).
 
-Подключите Caddy и приложение к общей Docker-сети. Для подпути `/barkodd/` добавьте к своему сайту маршрут:
-
-```caddy
-redir /barkodd /barkodd/ 308
-handle_path /barkodd/* {
-    reverse_proxy barkodd-app:8080
-}
-```
-
-Caddy снимает префикс перед передачей запроса приложению. Из каталога проекта запустите приложение и проверьте публичный маршрут, подставив свой домен:
-
-```sh
-docker compose -f deploy/compose.macmini.example.yaml --env-file .env up -d --build
-curl -fsS https://dog.example.com/barkodd/healthz
-```
-
-Комнаты и снимки хранятся в постоянном томе. Для работы WebRTC через TURN задайте параметры своего relay-сервера в `.env` и проверьте передачу видео между устройствами в разных сетях.
+При обновлении заменяйте только приложение. Если в том же Compose-проекте работает отдельный TURN, `--remove-orphans` может остановить его. После обновления проверьте `/healthz` под публичным префиксом и откройте видео на телефоне с выключенным Wi-Fi.
 
 ## Конфигурация бинарника
 

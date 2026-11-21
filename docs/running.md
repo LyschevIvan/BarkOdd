@@ -35,7 +35,7 @@ make init ENV_FILE=.env.production
 make run ENV_FILE=.env.local
 ```
 
-Не добавляйте файлы с секретами в Git. `.env` и `.env.*` исключены из индекса, кроме `.env.example`. Если `ENV_FILE` находится за пределами репозитория или называется иначе, защитите его отдельно.
+Храните рабочие настройки в `.env` или `.env.production`, а конфигурацию прокси, сертификаты, ключи и заметки об установке — в каталоге `.local/` в корне проекта. Git и Docker игнорируют эти файлы. Для конфигурации окружения внутри `.local/` сначала создайте каталог (`mkdir -p -m 700 .local`), затем выполните `make init ENV_FILE=.local/production.env`.
 
 ### Формат и приоритет
 
@@ -175,9 +175,11 @@ make docker-config DEPLOY=macmini ENV_FILE=.env.macmini
 make docker-up DEPLOY=macmini ENV_FILE=.env.macmini
 ```
 
-[`deploy/compose.macmini.example.yaml`](../deploy/compose.macmini.example.yaml) запускает только приложение: alias `barkodd-app`, локальный порт `127.0.0.1:8087`, постоянный volume прежнего проекта `barkodd`. Caddy снимает `/barkodd/` перед передачей запроса. У Go-сервера нет собственного монтирования под подпутём.
+Шаблон [`deploy/compose.macmini.example.yaml`](../deploy/compose.macmini.example.yaml) запускает приложение с сетевым именем `barkodd-app`, локальным портом `127.0.0.1:8087` и постоянным томом в проекте `barkodd`. Caddy снимает `/barkodd/` перед передачей запроса приложению.
 
-Команда не создаёт Caddy и TURN. Не используйте `down -v` или `--remove-orphans` для обновления существующей установки. [Подробности текущей установки Mac mini](guide.md#macmini).
+Если для хоста нужны другие параметры Compose, скопируйте шаблон в `deploy/compose.macmini.yaml` и отредактируйте копию. Команды `make docker-… DEPLOY=macmini` автоматически выберут этот файл. Git и Docker исключают его из индекса и контекста сборки.
+
+Параметры `down -v` и `--remove-orphans` могут удалить тома или остановить отдельный TURN в той же установке. [Обновление и проверка видео с внешней сети](guide.md#macmini).
 
 ## Если запуск не удался
 
